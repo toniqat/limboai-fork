@@ -16,6 +16,8 @@
 
 #include "../bt/behavior_tree.h"
 #include "../bt/tasks/bt_task.h"
+#include "../hsm/hsm_resource.h"
+#include "hsm_editor_view.h"
 #include "owner_picker.h"
 #include "task_palette.h"
 #include "task_tree.h"
@@ -138,12 +140,15 @@ private:
 
 	EditorPlugin *plugin;
 	EditorLayout editor_layout;
-	Vector<Ref<BehaviorTree>> history;
+	// Tabs hold either a BehaviorTree or a HierarchicalStateMachine: the tab bar is the
+	// one place where "which document am I on" lives, and splitting it per type would
+	// make drilling from a state into its tree cross two tab bars.
+	Vector<Ref<Resource>> history;
 	int idx_history;
-	HashMap<Ref<BehaviorTree>, TreeSearch::SearchInfo> tab_search_context;
+	HashMap<Ref<Resource>, TreeSearch::SearchInfo> tab_search_context;
 	bool updating_tabs = false;
 	bool request_update_tabs = false;
-	HashSet<Ref<BehaviorTree>> dirty;
+	HashSet<Ref<Resource>> dirty;
 	Vector<Ref<BTTask>> clipboard;
 
 	VBoxContainer *vbox;
@@ -154,6 +159,7 @@ private:
 	PopupMenu *tab_menu;
 	OwnerPicker *owner_picker;
 	HSplitContainer *hsc;
+	HSMEditorView *hsm_view;
 	TaskTree *task_tree;
 	VBoxContainer *banners;
 	Panel *usage_hint;
@@ -202,12 +208,16 @@ private:
 	void _update_misc_menu();
 	void _update_banners();
 	void _new_bt();
-	void _save_bt(const Ref<BehaviorTree> &p_bt, const String &p_path);
+	void _save_resource(const Ref<Resource> &p_res, const String &p_path);
 	void _save_current_bt(const String &p_path);
 	void _load_bt(const String &p_path);
 	void _update_task_tree(const Ref<BehaviorTree> &p_bt, const Ref<BTTask> &p_specific_task = nullptr);
 	void _disable_editing();
-	void _set_as_dirty(const Ref<BehaviorTree> &p_bt, bool p_dirty);
+	void _set_as_dirty(const Ref<Resource> &p_res, bool p_dirty);
+
+	// Which half of the screen is showing. The tab's type is the only thing that decides.
+	void _show_editor_for(const Ref<Resource> &p_res);
+	void _on_hsm_edited();
 	void _create_user_task_dir(String task_dir);
 	void _remove_task_from_favorite(const String &p_task);
 	void _save_and_restart();
@@ -264,6 +274,7 @@ protected:
 public:
 	void set_plugin(EditorPlugin *p_plugin) { plugin = p_plugin; };
 	void edit_bt(const Ref<BehaviorTree> &p_behavior_tree, bool p_force_refresh = false);
+	void edit_hsm(const Ref<HierarchicalStateMachine> &p_hsm, bool p_force_refresh = false);
 	Ref<BlackboardPlan> get_edited_blackboard_plan();
 	void set_window_layout(const Ref<ConfigFile> &p_configuration);
 	void get_window_layout(const Ref<ConfigFile> &p_configuration);

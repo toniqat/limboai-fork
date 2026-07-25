@@ -12,6 +12,7 @@
 #ifndef LIMBO_HSM_H
 #define LIMBO_HSM_H
 
+#include "hsm_resource.h"
 #include "limbo_state.h"
 
 #define TransitionKey Pair<uint64_t, StringName>
@@ -63,8 +64,15 @@ private:
 
 	HashMap<TransitionKey, Transition, TransitionKeyHasher> transitions;
 
+	Ref<HierarchicalStateMachine> hsm;
+	bool built_from_resource = false;
+
 	void _get_transition(LimboState *p_from_state, const StringName &p_event, Transition &r_transition) const;
 	void _exit_if_not_inside_tree();
+
+	LimboState *_create_state_node(const Ref<HSMState> &p_spec);
+	void _instantiate_states(const Ref<HSMState> &p_spec, LimboHSM *p_machine, HashMap<uint64_t, LimboState *> &r_nodes);
+	void _wire_transitions(const Ref<HSMState> &p_spec, LimboHSM *p_machine, const HashMap<uint64_t, LimboState *> &p_nodes);
 
 protected:
 	static void _bind_methods();
@@ -82,6 +90,14 @@ protected:
 public:
 	void set_update_mode(UpdateMode p_mode) { update_mode = p_mode; }
 	UpdateMode get_update_mode() const { return update_mode; }
+
+	void set_hsm(const Ref<HierarchicalStateMachine> &p_hsm);
+	Ref<HierarchicalStateMachine> get_hsm() const { return hsm; }
+
+	// Builds child states and transitions from the resource. Called automatically when
+	// the node becomes ready with a resource set; safe to call once only.
+	void build_from_resource();
+	bool is_built_from_resource() const { return built_from_resource; }
 
 	void set_active(bool p_active);
 

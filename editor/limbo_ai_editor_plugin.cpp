@@ -214,21 +214,21 @@ void LimboAIEditor::_new_bt() {
 	EditorInterface::get_singleton()->edit_resource(bt);
 }
 
-void LimboAIEditor::_save_bt(const Ref<BehaviorTree> &p_bt, const String &p_path) {
+void LimboAIEditor::_save_resource(const Ref<Resource> &p_res, const String &p_path) {
 	ERR_FAIL_COND(p_path.is_empty());
 	ERR_FAIL_COND(!p_path.begins_with("res://"));
-	ERR_FAIL_COND(p_bt.is_null());
+	ERR_FAIL_COND(p_res.is_null());
 
-	if (p_bt->get_path() != p_path) {
+	if (p_res->get_path() != p_path) {
 #ifdef LIMBOAI_MODULE
-		task_tree->get_bt()->set_path(p_path, true);
+		p_res->set_path(p_path, true);
 #elif LIMBOAI_GDEXTENSION
-		task_tree->get_bt()->take_over_path(p_path);
+		p_res->take_over_path(p_path);
 #endif
 	}
 
 	// This is a workaround, because EditorNode::save_resource() function is not accessible in GDExtension.
-	if (RESOURCE_IS_BUILT_IN(p_bt)) {
+	if (RESOURCE_IS_BUILT_IN(p_res)) {
 		// If built-in resource - save the containing resource instead.
 		String file_path = p_path.get_slice("::", 0);
 		ERR_FAIL_COND_MSG(!RESOURCE_EXISTS(file_path, "Resource"), "LimboAI: SAVE FAILED - resource file doesn't exist: " + file_path);
@@ -251,18 +251,18 @@ void LimboAIEditor::_save_bt(const Ref<BehaviorTree> &p_bt, const String &p_path
 		}
 	} else {
 		// If external resource - save to file.
-		RESOURCE_SAVE(p_bt, p_path, ResourceSaver::FLAG_CHANGE_PATH);
+		RESOURCE_SAVE(p_res, p_path, ResourceSaver::FLAG_CHANGE_PATH);
 	}
 
-	_set_as_dirty(p_bt, false);
+	_set_as_dirty(p_res, false);
 	_update_tabs();
 }
 
 void LimboAIEditor::_save_current_bt(const String &p_path) {
 	ERR_FAIL_COND_MSG(p_path.is_empty(), "LimboAI: SAVE FAILED - p_path is empty");
-	ERR_FAIL_COND_MSG(task_tree->get_bt().is_null(), "LimboAI: SAVE FAILED - bt is null");
+	ERR_FAIL_COND(idx_history < 0 || idx_history >= history.size());
 
-	_save_bt(task_tree->get_bt(), p_path);
+	_save_resource(history[idx_history], p_path);
 }
 
 void LimboAIEditor::_load_bt(const String &p_path) {
@@ -298,7 +298,55 @@ void LimboAIEditor::_disable_editing() {
 	task_tree->unload();
 	task_palette->hide();
 	task_tree->hide();
+	hsm_view->hide();
+	hsc->show();
 	usage_hint->show();
+}
+
+void LimboAIEditor::_show_editor_for(const Ref<Resource> &p_res) {
+	if (Object::cast_to<HierarchicalStateMachine>(p_res.ptr()) != nullptr) {
+		hsc->hide();
+		hsm_view->show();
+		return;
+	}
+	hsm_view->hide();
+	hsc->show();
+	usage_hint->hide();
+	task_tree->show();
+	task_palette->show();
+}
+
+void LimboAIEditor::_on_hsm_edited() {
+	Ref<Resource> edited = hsm_view->get_edited_hsm();
+	if (edited.is_valid()) {
+		_set_as_dirty(edited, true);
+		_update_tabs();
+	}
+}
+
+void LimboAIEditor::edit_hsm(const Ref<HierarchicalStateMachine> &p_hsm, bool p_force_refresh) {
+	ERR_FAIL_COND_MSG(p_hsm.is_null(), "p_hsm is null");
+
+	if (!p_force_refresh && hsm_view->get_edited_hsm() == p_hsm) {
+		return;
+	}
+
+	hsm_view->edit_hsm(p_hsm);
+
+	if (!p_hsm->is_connected(LW_NAME(changed), callable_mp(this, &LimboAIEditor::_set_as_dirty))) {
+		p_hsm->connect(LW_NAME(changed), callable_mp(this, &LimboAIEditor::_set_as_dirty).bind(p_hsm, true));
+	}
+
+	int idx = history.find(p_hsm);
+	if (idx != -1) {
+		idx_history = idx;
+	} else {
+		history.push_back(p_hsm);
+		idx_history = history.size() - 1;
+	}
+
+	_show_editor_for(p_hsm);
+	_update_tabs();
 }
 
 void LimboAIEditor::edit_bt(const Ref<BehaviorTree> &p_behavior_tree, bool p_force_refresh) {
@@ -315,7 +363,7 @@ void LimboAIEditor::edit_bt(const Ref<BehaviorTree> &p_behavior_tree, bool p_for
 	p_behavior_tree->notify_property_list_changed();
 #endif // LIMBOAI_MODULE
 	// Remember current search info.
-	if (idx_history >= 0 && idx_history < history.size() && task_tree->get_bt() == history[idx_history]) {
+	if (idx_history >= 0 && idx_history < history.size() && task_tree->get_bt().ptr() == history[idx_history].ptr()) {
 		tab_search_context.insert(history[idx_history], task_tree->tree_search_get_search_info());
 	}
 
@@ -333,9 +381,7 @@ void LimboAIEditor::edit_bt(const Ref<BehaviorTree> &p_behavior_tree, bool p_for
 		idx_history = history.size() - 1;
 	}
 
-	usage_hint->hide();
-	task_tree->show();
-	task_palette->show();
+	_show_editor_for(p_behavior_tree);
 
 	// Restore search info from [tab_search_context].
 	if (idx_history >= 0 && idx_history < history.size()) {
@@ -364,7 +410,17 @@ void LimboAIEditor::set_window_layout(const Ref<ConfigFile> &p_configuration) {
 	open_bts = p_configuration->get_value("LimboAI", "bteditor_open_bts", open_bts);
 	for (int i = 0; i < open_bts.size(); i++) {
 		String path = open_bts[i];
-		if (FILE_EXISTS(path)) {
+		if (!FILE_EXISTS(path)) {
+			continue;
+		}
+		// A reopened tab may be either kind: the layout only remembers paths.
+		Ref<Resource> res = RESOURCE_LOAD(path, "Resource");
+		if (res.is_null()) {
+			continue;
+		}
+		if (Object::cast_to<HierarchicalStateMachine>(res.ptr()) != nullptr) {
+			EditorInterface::get_singleton()->edit_resource(res);
+		} else if (Object::cast_to<BehaviorTree>(res.ptr()) != nullptr) {
 			_load_bt(path);
 		}
 	}
@@ -374,8 +430,8 @@ void LimboAIEditor::set_window_layout(const Ref<ConfigFile> &p_configuration) {
 
 void LimboAIEditor::get_window_layout(const Ref<ConfigFile> &p_configuration) {
 	Array open_bts;
-	for (const Ref<BehaviorTree> &bt : history) {
-		open_bts.push_back(bt->get_path());
+	for (const Ref<Resource> &res : history) {
+		open_bts.push_back(res->get_path());
 	}
 	p_configuration->set_value("LimboAI", "bteditor_open_bts", open_bts);
 
@@ -387,11 +443,11 @@ void LimboAIEditor::get_window_layout(const Ref<ConfigFile> &p_configuration) {
 	p_configuration->set_value("LimboAI", "bteditor_hsplit", split_offset);
 }
 
-void LimboAIEditor::_set_as_dirty(const Ref<BehaviorTree> &p_bt, bool p_dirty) {
-	if (p_dirty && !dirty.has(p_bt)) {
-		dirty.insert(p_bt);
-	} else if (p_dirty == false && dirty.has(p_bt)) {
-		dirty.erase(p_bt);
+void LimboAIEditor::_set_as_dirty(const Ref<Resource> &p_res, bool p_dirty) {
+	if (p_dirty && !dirty.has(p_res)) {
+		dirty.insert(p_res);
+	} else if (p_dirty == false && dirty.has(p_res)) {
+		dirty.erase(p_res);
 	}
 }
 
@@ -1028,10 +1084,10 @@ void LimboAIEditor::_on_visibility_changed() {
 }
 
 void LimboAIEditor::_on_save_pressed() {
-	if (task_tree->get_bt().is_null()) {
+	if (idx_history < 0 || idx_history >= history.size()) {
 		return;
 	}
-	String path = task_tree->get_bt()->get_path();
+	String path = history[idx_history]->get_path();
 	if (path.is_empty()) {
 		save_dialog->popup_centered_ratio();
 	} else {
@@ -1225,12 +1281,12 @@ void LimboAIEditor::_tab_clicked(int p_tab) {
 
 void LimboAIEditor::_tab_closed(int p_tab) {
 	ERR_FAIL_INDEX(p_tab, history.size());
-	Ref<BehaviorTree> history_bt = history[p_tab];
-	if (history_bt.is_valid() && history_bt->is_connected(LW_NAME(changed), callable_mp(this, &LimboAIEditor::_set_as_dirty))) {
-		history_bt->disconnect(LW_NAME(changed), callable_mp(this, &LimboAIEditor::_set_as_dirty));
+	Ref<Resource> history_res = history[p_tab];
+	if (history_res.is_valid() && history_res->is_connected(LW_NAME(changed), callable_mp(this, &LimboAIEditor::_set_as_dirty))) {
+		history_res->disconnect(LW_NAME(changed), callable_mp(this, &LimboAIEditor::_set_as_dirty));
 	}
-	if (tab_search_context.has(history_bt)) {
-		tab_search_context.erase(history_bt);
+	if (tab_search_context.has(history_res)) {
+		tab_search_context.erase(history_res);
 	}
 
 	history.remove_at(p_tab);
@@ -1240,8 +1296,10 @@ void LimboAIEditor::_tab_closed(int p_tab) {
 		_disable_editing();
 	} else {
 		EditorInterface::get_singleton()->edit_resource(history[idx_history]);
-		ERR_FAIL_COND(!tab_search_context.has(history[idx_history]));
-		search_info_opened_tab = tab_search_context[history[idx_history]];
+		// A state machine tab never has search context -- only the task tree searches.
+		if (tab_search_context.has(history[idx_history])) {
+			search_info_opened_tab = tab_search_context[history[idx_history]];
+		}
 	}
 
 	task_tree->tree_search_set_search_info(search_info_opened_tab);
@@ -1279,8 +1337,10 @@ void LimboAIEditor::_update_tabs() {
 			// Use the full name if the short name is not unique.
 			tab_name = history[i]->get_path().trim_prefix("res://");
 		}
-		tab_bar->add_tab(tab_name, LimboUtility::get_singleton()->get_task_icon("BehaviorTree"));
-		if (i == idx_history) {
+		bool is_hsm = Object::cast_to<HierarchicalStateMachine>(history[i].ptr()) != nullptr;
+		tab_bar->add_tab(tab_name, LimboUtility::get_singleton()->get_task_icon(is_hsm ? "LimboHSM" : "BehaviorTree"));
+		if (i == idx_history && !is_hsm) {
+			// The blackboard plan belongs to a behavior tree; a state machine has none.
 			tab_bar->set_tab_button_icon(tab_bar->get_tab_count() - 1, LimboUtility::get_singleton()->get_task_icon("LimboEditBlackboard"));
 		}
 	}
@@ -1298,9 +1358,9 @@ void LimboAIEditor::_move_active_tab(int p_to_index) {
 	if (idx_history == p_to_index) {
 		return;
 	}
-	Ref<BehaviorTree> bt = history[idx_history];
+	Ref<Resource> res = history[idx_history];
 	history.remove_at(idx_history);
-	history.insert(p_to_index, bt);
+	history.insert(p_to_index, res);
 	idx_history = p_to_index;
 	_update_tabs();
 }
@@ -1344,17 +1404,17 @@ void LimboAIEditor::_tab_menu_option_selected(int p_id) {
 
 	switch (p_id) {
 		case TAB_SHOW_IN_FILESYSTEM: {
-			Ref<BehaviorTree> bt = history[idx_history];
-			String path = bt->get_path();
+			Ref<Resource> res = history[idx_history];
+			String path = res->get_path();
 			if (!path.is_empty()) {
 				FileSystemDock *dock = EditorInterface::get_singleton()->get_file_system_dock();
 				dock->navigate_to_path(path.get_slice("::", 0));
 			}
 		} break;
 		case TAB_JUMP_TO_OWNER: {
-			Ref<BehaviorTree> bt = history[idx_history];
-			ERR_FAIL_COND(bt.is_null());
-			String bt_path = bt->get_path();
+			Ref<Resource> res = history[idx_history];
+			ERR_FAIL_COND(res.is_null());
+			String bt_path = res->get_path();
 			if (!bt_path.is_empty()) {
 				owner_picker->pick_and_open_owner_of_resource(bt_path);
 			}
@@ -1363,9 +1423,9 @@ void LimboAIEditor::_tab_menu_option_selected(int p_id) {
 			_tab_closed(idx_history);
 		} break;
 		case TAB_CLOSE_OTHER: {
-			Ref<BehaviorTree> bt = history[idx_history];
+			Ref<Resource> res = history[idx_history];
 			history.clear();
-			history.append(bt);
+			history.append(res);
 			idx_history = 0;
 			_update_tabs();
 		} break;
@@ -1386,8 +1446,10 @@ void LimboAIEditor::_tab_menu_option_selected(int p_id) {
 
 void LimboAIEditor::_tab_plan_edited(int p_tab) {
 	ERR_FAIL_INDEX(p_tab, history.size());
-	if (history[p_tab]->get_blackboard_plan().is_valid()) {
-		EditorInterface::get_singleton()->edit_resource(history[p_tab]->get_blackboard_plan());
+	// Only a behavior tree carries a blackboard plan; the button is not drawn otherwise.
+	Ref<BehaviorTree> bt = history[p_tab];
+	if (bt.is_valid() && bt->get_blackboard_plan().is_valid()) {
+		EditorInterface::get_singleton()->edit_resource(bt->get_blackboard_plan());
 	}
 }
 
@@ -1408,12 +1470,11 @@ void LimboAIEditor::_reload_modified() {
 
 void LimboAIEditor::_resave_modified(String _str) {
 	for (const String &res_path : disk_changed_files) {
-		Ref<BehaviorTree> bt = RESOURCE_LOAD(res_path, "BehaviorTree");
-		if (bt.is_valid()) {
-			ERR_FAIL_COND(!bt->is_class("BehaviorTree"));
-			if (RESOURCE_IS_EXTERNAL(bt)) {
+		Ref<Resource> res = RESOURCE_LOAD(res_path, "Resource");
+		if (res.is_valid()) {
+			if (RESOURCE_IS_EXTERNAL(res)) {
 				// Only resave external - scene files are handled by the editor.
-				_save_bt(bt, bt->get_path());
+				_save_resource(res, res->get_path());
 			}
 		}
 	}
@@ -1441,10 +1502,10 @@ void LimboAIEditor::_rename_task_confirmed() {
 
 void LimboAIEditor::save_all(bool p_external_only) {
 	for (int i = 0; i < history.size(); i++) {
-		Ref<BehaviorTree> bt = history.get(i);
-		String path = bt->get_path();
-		if (RESOURCE_EXISTS(path, "BehaviorTree") && (!p_external_only || RESOURCE_PATH_IS_EXTERNAL(path))) {
-			_save_bt(bt, path);
+		Ref<Resource> res = history.get(i);
+		String path = res->get_path();
+		if (RESOURCE_EXISTS(path, "Resource") && (!p_external_only || RESOURCE_PATH_IS_EXTERNAL(path))) {
+			_save_resource(res, path);
 		}
 	}
 }
@@ -1873,6 +1934,13 @@ LimboAIEditor::LimboAIEditor() {
 	task_palette->hide();
 	hsc->add_child(task_palette);
 
+	// A sibling of hsc rather than a child: the two halves fill the same space and only
+	// one of them stands at a time, which is what the tab's type decides.
+	hsm_view = memnew(HSMEditorView);
+	hsm_view->hide();
+	vbox->add_child(hsm_view);
+	hsm_view->connect("hsm_edited", callable_mp(this, &LimboAIEditor::_on_hsm_edited));
+
 	banners = memnew(VBoxContainer);
 	vbox->add_child(banners);
 
@@ -2050,8 +2118,13 @@ void LimboAIEditorPlugin::_notification(int p_notification) {
 		case NOTIFICATION_ENTER_TREE: {
 			// Add BehaviorTree to the list of resources that should open in a new inspector.
 			PackedStringArray open_in_new_inspector = EDITOR_GET("interface/inspector/resources_to_open_in_new_inspector");
-			if (!open_in_new_inspector.has("BehaviorTree")) {
-				open_in_new_inspector.push_back("BehaviorTree");
+			if (!open_in_new_inspector.has("BehaviorTree") || !open_in_new_inspector.has("HierarchicalStateMachine")) {
+				if (!open_in_new_inspector.has("BehaviorTree")) {
+					open_in_new_inspector.push_back("BehaviorTree");
+				}
+				if (!open_in_new_inspector.has("HierarchicalStateMachine")) {
+					open_in_new_inspector.push_back("HierarchicalStateMachine");
+				}
 				EDITOR_SETTINGS()->set_setting("interface/inspector/resources_to_open_in_new_inspector", open_in_new_inspector);
 			}
 		} break;
@@ -2090,6 +2163,11 @@ void LimboAIEditorPlugin::_edit(Object *p_object) {
 	Ref<BehaviorTree> bt = Object::cast_to<BehaviorTree>(p_object);
 	if (bt.is_valid()) {
 		limbo_ai_editor->edit_bt(bt);
+		return;
+	}
+	Ref<HierarchicalStateMachine> hsm = Object::cast_to<HierarchicalStateMachine>(p_object);
+	if (hsm.is_valid()) {
+		limbo_ai_editor->edit_hsm(hsm);
 	}
 }
 
@@ -2099,6 +2177,9 @@ bool LimboAIEditorPlugin::handles(Object *p_object) const {
 bool LimboAIEditorPlugin::_handles(Object *p_object) const {
 #endif
 	if (Object::cast_to<BehaviorTree>(p_object)) {
+		return true;
+	}
+	if (Object::cast_to<HierarchicalStateMachine>(p_object)) {
 		return true;
 	}
 	return false;

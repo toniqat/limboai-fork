@@ -11,7 +11,177 @@
 
 #include "limbo_hsm.h"
 
+#include "../bt/bt_state.h"
+#include "../compat/variant.h"
+
+#ifdef LIMBOAI_MODULE
+#include "core/config/engine.h"
+#include "core/object/class_db.h"
+#endif // LIMBOAI_MODULE
+
+#ifdef LIMBOAI_GDEXTENSION
+#include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/core/class_db.hpp>
+#endif // LIMBOAI_GDEXTENSION
+
 VARIANT_ENUM_CAST(LimboHSM::UpdateMode);
+
+void LimboHSM::set_hsm(const Ref<HierarchicalStateMachine> &p_hsm) {
+	hsm = p_hsm;
+}
+
+LimboState *LimboHSM::_create_state_node(const Ref<HSMState> &p_spec) {
+	ERR_FAIL_COND_V(p_spec.is_null(), nullptr);
+
+	StringName base_type = p_spec->resolve_base_type();
+	ERR_FAIL_COND_V_MSG(!ClassDB::class_exists(base_type), nullptr,
+			vformat("LimboHSM: State \"%s\" resolves to an unknown type \"%s\".", p_spec->get_state_name(), base_type));
+	ERR_FAIL_COND_V_MSG(!ClassDB::is_parent_class(base_type, "LimboState"), nullptr,
+			vformat("LimboHSM: State \"%s\" resolves to \"%s\", which is not a LimboState.", p_spec->get_state_name(), base_type));
+	// A state that owns children must become a machine -- otherwise the children have
+	// nowhere to hang and the transitions between them have no owner.
+	ERR_FAIL_COND_V_MSG(p_spec->is_machine() && !ClassDB::is_parent_class(base_type, "LimboHSM"), nullptr,
+			vformat("LimboHSM: State \"%s\" has children but resolves to \"%s\", which is not a LimboHSM.", p_spec->get_state_name(), base_type));
+
+	Variant inst = ClassDB::instantiate(base_type);
+	Object *obj = inst;
+	LimboState *state = Object::cast_to<LimboState>(obj);
+	if (state == nullptr) {
+		VARIANT_DELETE_IF_OBJECT(inst);
+		ERR_FAIL_V_MSG(nullptr, vformat("LimboHSM: Failed to create state \"%s\" of type \"%s\".", p_spec->get_state_name(), base_type));
+	}
+
+	state->set_name(p_spec->get_state_name());
+	if (p_spec->get_state_script().is_valid()) {
+		state->set_script(p_spec->get_state_script());
+	}
+
+	LimboHSM *nested = Object::cast_to<LimboHSM>(state);
+	if (nested != nullptr) {
+		// A nested machine is driven by its parent's update(). Letting it tick itself
+		// would run it twice in one frame, so this is not something a file gets to say.
+		nested->set_update_mode(UpdateMode::MANUAL);
+	}
+
+	BTState *bt_state = Object::cast_to<BTState>(state);
+	if (bt_state != nullptr) {
+		// A node created at runtime has no owner, and BTState falls back to get_owner()
+		// to establish the scene root -- without this it refuses to instantiate its tree.
+		// The root machine is that root: when the same machine is built from a scene
+		// instead, its states are owned by exactly this node.
+		bt_state->set_scene_root_hint(get_owner() != nullptr ? get_owner() : this);
+		if (p_spec->get_behavior_tree().is_valid()) {
+			bt_state->set_behavior_tree(p_spec->get_behavior_tree());
+		}
+	}
+	return state;
+}
+
+void LimboHSM::_instantiate_states(const Ref<HSMState> &p_spec, LimboHSM *p_machine, HashMap<uint64_t, LimboState *> &r_nodes) {
+	ERR_FAIL_COND(p_spec.is_null());
+	ERR_FAIL_NULL(p_machine);
+
+	TypedArray<HSMState> children = p_spec->get_children();
+	for (int i = 0; i < children.size(); i++) {
+		Ref<HSMState> spec = children[i];
+		if (spec.is_null()) {
+			ERR_PRINT(vformat("LimboHSM: State \"%s\" has an empty child slot at %d.", p_spec->get_state_name(), i));
+			continue;
+		}
+		// The same state resource appearing twice would give one node two parents; it is
+		// also how a cycle in the file shows up, and a cycle would never return.
+		if (r_nodes.has(spec->get_instance_id())) {
+			ERR_PRINT(vformat("LimboHSM: State \"%s\" appears more than once.", spec->get_state_name()));
+			continue;
+		}
+
+		LimboState *node = _create_state_node(spec);
+		if (node == nullptr) {
+			continue;
+		}
+		r_nodes[spec->get_instance_id()] = node;
+		p_machine->add_child(node);
+
+		if (spec->is_machine()) {
+			_instantiate_states(spec, Object::cast_to<LimboHSM>(node), r_nodes);
+		}
+	}
+
+	Ref<HSMState> initial = p_spec->get_initial_child();
+	if (initial.is_valid()) {
+		LimboState *const *found = r_nodes.getptr(initial->get_instance_id());
+		if (found != nullptr) {
+			p_machine->set_initial_state(*found);
+		} else {
+			ERR_PRINT(vformat("LimboHSM: Initial state of \"%s\" is not one of its children.", p_spec->get_state_name()));
+		}
+	}
+}
+
+void LimboHSM::_wire_transitions(const Ref<HSMState> &p_spec, LimboHSM *p_machine, const HashMap<uint64_t, LimboState *> &p_nodes) {
+	ERR_FAIL_COND(p_spec.is_null());
+	ERR_FAIL_NULL(p_machine);
+
+	TypedArray<HSMTransition> rows = p_spec->get_transitions();
+	for (int i = 0; i < rows.size(); i++) {
+		Ref<HSMTransition> row = rows[i];
+		if (row.is_null()) {
+			continue;
+		}
+		Ref<HSMState> to_spec = row->get_to();
+		if (to_spec.is_null()) {
+			ERR_PRINT(vformat("LimboHSM: A transition of \"%s\" has no destination.", p_spec->get_state_name()));
+			continue;
+		}
+		LimboState *const *to = p_nodes.getptr(to_spec->get_instance_id());
+		if (to == nullptr) {
+			ERR_PRINT(vformat("LimboHSM: Destination \"%s\" of a transition of \"%s\" was not built.", to_spec->get_state_name(), p_spec->get_state_name()));
+			continue;
+		}
+
+		// An empty `from` is ANYSTATE -- there is no state being left.
+		LimboState *from = nullptr;
+		Ref<HSMState> from_spec = row->get_from();
+		if (from_spec.is_valid()) {
+			LimboState *const *found = p_nodes.getptr(from_spec->get_instance_id());
+			if (found == nullptr) {
+				ERR_PRINT(vformat("LimboHSM: Origin \"%s\" of a transition of \"%s\" was not built.", from_spec->get_state_name(), p_spec->get_state_name()));
+				continue;
+			}
+			from = *found;
+		}
+		p_machine->add_transition(from, *to, row->get_event());
+	}
+
+	TypedArray<HSMState> children = p_spec->get_children();
+	for (int i = 0; i < children.size(); i++) {
+		Ref<HSMState> spec = children[i];
+		if (spec.is_null() || !spec->is_machine()) {
+			continue;
+		}
+		LimboState *const *node = p_nodes.getptr(spec->get_instance_id());
+		if (node == nullptr) {
+			continue;
+		}
+		_wire_transitions(spec, Object::cast_to<LimboHSM>(*node), p_nodes);
+	}
+}
+
+void LimboHSM::build_from_resource() {
+	ERR_FAIL_COND_MSG(hsm.is_null(), "LimboHSM: No state machine resource to build from.");
+	ERR_FAIL_COND_MSG(built_from_resource, "LimboHSM: Already built from a resource.");
+
+	Ref<HSMState> root = hsm->get_root();
+	ERR_FAIL_COND_MSG(root.is_null(), vformat("LimboHSM: State machine resource has no root state: %s", hsm->get_path()));
+
+	built_from_resource = true;
+
+	// The root state is this node -- it is not instantiated, only its children are.
+	HashMap<uint64_t, LimboState *> nodes;
+	nodes[root->get_instance_id()] = this;
+	_instantiate_states(root, this, nodes);
+	_wire_transitions(root, this, nodes);
+}
 
 void LimboHSM::set_active(bool p_active) {
 	ERR_FAIL_COND_MSG(agent == nullptr, "LimboHSM is not initialized.");
@@ -258,6 +428,13 @@ void LimboHSM::_exit_if_not_inside_tree() {
 
 void LimboHSM::_notification(int p_what) {
 	switch (p_what) {
+		case NOTIFICATION_READY: {
+			// Built here rather than when the resource is assigned: the owner may set it
+			// before the node is in the tree, and states must not be created twice.
+			if (hsm.is_valid() && !built_from_resource && !Engine::get_singleton()->is_editor_hint()) {
+				build_from_resource();
+			}
+		} break;
 		case NOTIFICATION_POST_ENTER_TREE: {
 			if (was_active && is_root()) {
 				// Re-activate the root HSM if it was previously active.
@@ -310,6 +487,11 @@ void LimboHSM::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_update_mode", "mode"), &LimboHSM::set_update_mode);
 	ClassDB::bind_method(D_METHOD("get_update_mode"), &LimboHSM::get_update_mode);
 
+	ClassDB::bind_method(D_METHOD("set_hsm", "hsm"), &LimboHSM::set_hsm);
+	ClassDB::bind_method(D_METHOD("get_hsm"), &LimboHSM::get_hsm);
+	ClassDB::bind_method(D_METHOD("build_from_resource"), &LimboHSM::build_from_resource);
+	ClassDB::bind_method(D_METHOD("is_built_from_resource"), &LimboHSM::is_built_from_resource);
+
 	ClassDB::bind_method(D_METHOD("set_initial_state", "state"), &LimboHSM::set_initial_state);
 	ClassDB::bind_method(D_METHOD("get_initial_state"), &LimboHSM::get_initial_state);
 
@@ -330,6 +512,7 @@ void LimboHSM::_bind_methods() {
 	BIND_ENUM_CONSTANT(MANUAL);
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "update_mode", PROPERTY_HINT_ENUM, "Idle, Physics, Manual"), "set_update_mode", "get_update_mode");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "hsm", PROPERTY_HINT_RESOURCE_TYPE, "HierarchicalStateMachine"), "set_hsm", "get_hsm");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "ANYSTATE", PROPERTY_HINT_RESOURCE_TYPE, "LimboState", 0), "", "anystate");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "initial_state", PROPERTY_HINT_RESOURCE_TYPE, "LimboState", 0), "set_initial_state", "get_initial_state");
 
