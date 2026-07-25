@@ -15,10 +15,12 @@
 
 #include "../compat/editor.h"
 #include "../compat/editor_scale.h"
+#include "../compat/limbo_compat.h"
 #include "../compat/translation.h"
 #include "../util/limbo_utility.h"
 
 #ifdef LIMBOAI_MODULE
+#include "core/input/input_event.h"
 #include "core/string/string_name.h"
 #include "scene/gui/control.h"
 #include "scene/resources/style_box_flat.h"
@@ -26,6 +28,7 @@
 
 #ifdef LIMBOAI_GDEXTENSION
 #include <godot_cpp/classes/control.hpp>
+#include <godot_cpp/classes/input_event_mouse_button.hpp>
 #include <godot_cpp/classes/tree_item.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #endif // LIMBOAI_GDEXTENSION
@@ -65,7 +68,11 @@ GraphNode *HSMEditorView::_make_node(const Ref<HSMState> &p_state, const Ref<HSM
 		kind = vformat(TTR("machine (%d)"), p_state->get_children().size());
 	} else if (p_state->get_behavior_tree().is_valid()) {
 		color = COLOR_TREE;
-		kind = TTR("behavior tree");
+		// The file name rather than the word "tree": the color already says it is one,
+		// and which one it is has no other place on the graph.
+		String path = p_state->get_behavior_tree()->get_path();
+		kind = path.is_empty() ? TTR("behavior tree") : path.get_file();
+		node->set_tooltip_text(TTR("Double-click to open this behavior tree."));
 	}
 
 	// A GraphNode needs at least one child control before slot 0 exists.
@@ -73,6 +80,11 @@ GraphNode *HSMEditorView::_make_node(const Ref<HSMState> &p_state, const Ref<HSM
 	label->set_text(kind);
 	node->add_child(label);
 	node->set_slot(0, true, 0, color, true, 0, color);
+
+	// Drilling in is the node's own gesture, not the graph's: GraphEdit has no
+	// "node activated" of its own, and the `gui_input` signal is emitted before the
+	// node's own dragging handler sees the press.
+	node->connect("gui_input", callable_mp(this, &HSMEditorView::_on_graph_node_gui_input).bind(node->get_name()));
 
 	Vector2 pos = p_state->get_graph_position();
 	if (pos == Vector2()) {
@@ -331,6 +343,43 @@ void HSMEditorView::_on_graph_node_selected(Node *p_node) {
 	EditorInterface::get_singleton()->edit_resource(entry->spec);
 }
 
+void HSMEditorView::_drill_into(const Ref<HSMState> &p_state) {
+	if (p_state.is_null()) {
+		return;
+	}
+	Ref<BehaviorTree> tree = p_state->get_behavior_tree();
+	if (tree.is_null()) {
+		// Only a state that holds a tree has somewhere to go. The color already says
+		// which ones those are, so a message here would repeat what the graph shows.
+		return;
+	}
+	// The same one line BTSubtree already uses to drill into its subtree: the plugin
+	// handles both resource types, so the tree opens as a tab on the same tab bar.
+	EditorInterface::get_singleton()->edit_resource(tree);
+}
+
+void HSMEditorView::_on_list_item_activated() {
+	_drill_into(_selected_spec());
+}
+
+void HSMEditorView::_on_graph_node_gui_input(const Ref<InputEvent> &p_event, const StringName &p_name) {
+	Ref<InputEventMouseButton> mb = p_event;
+	if (mb.is_null() || !mb->is_pressed() || !mb->is_double_click() || mb->get_button_index() != LW_MBTN(LEFT)) {
+		return;
+	}
+	const DrawnState *entry = drawn.getptr(p_name);
+	if (entry == nullptr || entry->spec->get_behavior_tree().is_null()) {
+		return;
+	}
+	// Swallowed, or the node would still be left mid-drag on a graph that is about to
+	// be hidden by the tree's tab.
+	GraphNode *node = Object::cast_to<GraphNode>(graph->get_node_or_null(NodePath(String(p_name))));
+	if (node != nullptr) {
+		node->accept_event();
+	}
+	_drill_into(entry->spec);
+}
+
 void HSMEditorView::_on_graph_end_node_move() {
 	if (updating || hsm.is_null()) {
 		return;
@@ -585,6 +634,7 @@ void HSMEditorView::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_READY: {
 			state_list->connect("item_selected", callable_mp(this, &HSMEditorView::_on_list_item_selected));
+			state_list->connect("item_activated", callable_mp(this, &HSMEditorView::_on_list_item_activated));
 			graph->connect("node_selected", callable_mp(this, &HSMEditorView::_on_graph_node_selected));
 			graph->connect("end_node_move", callable_mp(this, &HSMEditorView::_on_graph_end_node_move));
 			graph->connect("connection_request", callable_mp(this, &HSMEditorView::_on_connection_request));

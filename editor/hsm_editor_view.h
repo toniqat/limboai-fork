@@ -17,6 +17,7 @@
 #include "../hsm/hsm_resource.h"
 
 #ifdef LIMBOAI_MODULE
+#include "core/input/input_event.h"
 #include "core/templates/hash_map.h"
 #include "scene/gui/box_container.h"
 #include "scene/gui/button.h"
@@ -34,6 +35,7 @@
 #include <godot_cpp/classes/graph_node.hpp>
 #include <godot_cpp/classes/h_box_container.hpp>
 #include <godot_cpp/classes/h_split_container.hpp>
+#include <godot_cpp/classes/input_event.hpp>
 #include <godot_cpp/classes/label.hpp>
 #include <godot_cpp/classes/tree.hpp>
 #include <godot_cpp/classes/v_box_container.hpp>
@@ -85,8 +87,12 @@ private:
 	void _populate_list(const Ref<HSMState> &p_machine, TreeItem *p_parent);
 
 	void _on_list_item_selected();
+	void _on_list_item_activated();
 	void _on_graph_node_selected(Node *p_node);
+	void _on_graph_node_gui_input(const Ref<InputEvent> &p_event, const StringName &p_name);
 	void _on_graph_end_node_move();
+
+	void _drill_into(const Ref<HSMState> &p_state);
 
 	Ref<HSMState> _selected_spec() const;
 	Ref<HSMState> _machine_of(const Ref<HSMState> &p_state) const;
