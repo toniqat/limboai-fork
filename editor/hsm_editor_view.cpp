@@ -44,6 +44,11 @@ const Color COLOR_ANYSTATE = Color(0.78, 0.62, 0.35);
 const int COLUMN_WIDTH = 300;
 const int ROW_HEIGHT = 120;
 
+// Inherited states are drawn, because a machine that showed only what its own file adds
+// would be a picture of a diff rather than of the machine. They are dimmed because the
+// file being edited is not where they can be changed.
+const float INHERITED_ALPHA = 0.55;
+
 } // namespace
 
 StringName HSMEditorView::_node_name_for(const Ref<HSMState> &p_state) {
@@ -80,6 +85,11 @@ GraphNode *HSMEditorView::_make_node(const Ref<HSMState> &p_state, const Ref<HSM
 	label->set_text(kind);
 	node->add_child(label);
 	node->set_slot(0, true, 0, color, true, 0, color);
+
+	if (p_state->is_inherited()) {
+		node->set_self_modulate(Color(1, 1, 1, INHERITED_ALPHA));
+		node->set_tooltip_text(TTR("Inherited from the base machine. Change it there."));
+	}
 
 	// Drilling in is the node's own gesture, not the graph's: GraphEdit has no
 	// "node activated" of its own, and the `gui_input` signal is emitted before the
@@ -211,11 +221,18 @@ void HSMEditorView::_populate_list(const Ref<HSMState> &p_machine, TreeItem *p_p
 		item->set_metadata(0, Variant(int64_t(spec->get_instance_id())));
 
 		String suffix;
+		Color color = COLOR_PLAIN;
 		if (spec->is_machine()) {
-			item->set_custom_color(0, COLOR_MACHINE);
+			color = COLOR_MACHINE;
 		} else if (spec->get_behavior_tree().is_valid()) {
-			item->set_custom_color(0, COLOR_TREE);
+			color = COLOR_TREE;
 			suffix = " · BT";
+		}
+		if (spec->is_inherited()) {
+			color.a = INHERITED_ALPHA;
+		}
+		if (color != COLOR_PLAIN) {
+			item->set_custom_color(0, color);
 		}
 		if (p_machine->get_initial_child() == spec) {
 			// The one place the file answers "where does this machine start".
@@ -253,14 +270,18 @@ void HSMEditorView::refresh() {
 	state_list->clear();
 	drawn.clear();
 	node_names.clear();
+	merged_root.unref();
 
-	if (hsm.is_null() || hsm->get_root().is_null()) {
+	if (hsm.is_null() || hsm->get_effective_root().is_null()) {
 		list_title->set_text(TTR("No state machine"));
 		updating = false;
 		return;
 	}
 
-	Ref<HSMState> root = hsm->get_root();
+	// Recomputed here rather than kept: a merged tree is a picture of two files at one
+	// moment, and both of them can change between refreshes.
+	merged_root = hsm->get_effective_root();
+	Ref<HSMState> root = merged_root;
 	list_title->set_text(String(root->get_state_name()));
 
 	int row = 0;
@@ -311,12 +332,29 @@ void HSMEditorView::_on_list_item_selected() {
 	}
 	updating = false;
 
-	// The graph draws structure; everything else about a state -- its name, its script,
-	// its tree, its transitions and their events -- is shown by the Inspector. Splitting
-	// it that way is what the task tree already does for tasks.
 	const DrawnState *entry = drawn.getptr(*name);
 	if (entry != nullptr) {
-		EditorInterface::get_singleton()->edit_resource(entry->spec);
+		_inspect(entry->spec);
+	}
+}
+
+// The graph draws structure; everything else about a state -- its name, its script, its
+// tree, its transitions and their events -- is shown by the Inspector. Splitting it that
+// way is what the task tree already does for tasks.
+//
+// An inherited state goes nowhere: the Inspector would be editing a state that is thrown
+// away on the next refresh, and every keystroke would be silently lost.
+void HSMEditorView::_inspect(const Ref<HSMState> &p_drawn) {
+	if (p_drawn.is_null()) {
+		return;
+	}
+	if (p_drawn->is_inherited()) {
+		EditorInterface::get_singleton()->inspect_object(nullptr);
+		return;
+	}
+	Ref<HSMState> authored = _authored_of(p_drawn, false);
+	if (authored.is_valid()) {
+		EditorInterface::get_singleton()->edit_resource(authored);
 	}
 }
 
@@ -340,7 +378,7 @@ void HSMEditorView::_on_graph_node_selected(Node *p_node) {
 	}
 	updating = false;
 
-	EditorInterface::get_singleton()->edit_resource(entry->spec);
+	_inspect(entry->spec);
 }
 
 void HSMEditorView::_drill_into(const Ref<HSMState> &p_state) {
@@ -397,10 +435,19 @@ void HSMEditorView::_on_graph_end_node_move() {
 		// Snapped to whole pixels: writing floats straight through puts a diff in the
 		// file every time a node is merely brushed.
 		Vector2 pos = node->get_position_offset().round();
-		if (entry->spec->get_graph_position() != pos) {
-			entry->spec->set_graph_position(pos);
-			moved = true;
+		if (entry->spec->get_graph_position() == pos) {
+			continue;
 		}
+		// Where an inherited node sits is this file's own business, so laying one out is
+		// an edit like any other and gives it a stub. Compared against the drawn value
+		// first, or merely opening the tab would fill the file with stubs.
+		Ref<HSMState> authored = _authored_of(entry->spec, true);
+		if (authored.is_null()) {
+			continue;
+		}
+		entry->spec->set_graph_position(pos);
+		authored->set_graph_position(pos);
+		moved = true;
 	}
 	if (moved) {
 		emit_signal("hsm_edited");
@@ -413,8 +460,8 @@ Ref<HSMState> HSMEditorView::_selected_spec() const {
 		return nullptr;
 	}
 	uint64_t id = uint64_t(int64_t(item->get_metadata(0)));
-	if (hsm.is_valid() && hsm->get_root().is_valid() && hsm->get_root()->get_instance_id() == id) {
-		return hsm->get_root();
+	if (merged_root.is_valid() && merged_root->get_instance_id() == id) {
+		return merged_root;
 	}
 	const StringName *name = node_names.getptr(id);
 	if (name == nullptr) {
@@ -434,6 +481,45 @@ Ref<HSMState> HSMEditorView::_machine_of(const Ref<HSMState> &p_state) const {
 	}
 	const DrawnState *entry = drawn.getptr(*name);
 	return entry != nullptr ? entry->machine : Ref<HSMState>();
+}
+
+Ref<HSMState> HSMEditorView::_authored_of(const Ref<HSMState> &p_drawn, bool p_create) {
+	if (p_drawn.is_null() || hsm.is_null()) {
+		return nullptr;
+	}
+	if (p_drawn->get_origin().is_valid()) {
+		return p_drawn->get_origin();
+	}
+	if (!p_drawn->is_inherited()) {
+		// Nothing was merged, so the drawn state is the authored one.
+		return p_drawn;
+	}
+	if (!p_create) {
+		return nullptr;
+	}
+
+	// An edit that reaches an inherited state gives this file a state of its own that
+	// names it. That empty state is how a child file points at something it does not own:
+	// merging matches by name, so it lands back on the very state that is drawn here.
+	Ref<HSMState> parent_drawn = _machine_of(p_drawn);
+	if (parent_drawn.is_null()) {
+		// The root always has an authored counterpart -- edit_hsm() sees to that.
+		return hsm->get_root();
+	}
+	Ref<HSMState> parent = _authored_of(parent_drawn, true);
+	ERR_FAIL_COND_V(parent.is_null(), nullptr);
+
+	Ref<HSMState> stub;
+	stub.instantiate();
+	stub->set_state_name(p_drawn->get_state_name());
+	TypedArray<HSMState> children = parent->get_children();
+	children.append(stub);
+	parent->set_children(children);
+
+	// So that the rest of this edit -- and anything else before the next refresh -- finds
+	// it instead of making a second one.
+	p_drawn->set_origin(stub);
+	return stub;
 }
 
 StringName HSMEditorView::_unique_child_name(const Ref<HSMState> &p_machine) const {
@@ -490,17 +576,23 @@ void HSMEditorView::_on_add_pressed() {
 	if (hsm.is_null()) {
 		return;
 	}
-	Ref<HSMState> parent = _selected_spec();
-	if (parent.is_null()) {
-		parent = hsm->get_root();
+	Ref<HSMState> drawn_parent = _selected_spec();
+	if (drawn_parent.is_null()) {
+		drawn_parent = merged_root;
 	}
+	ERR_FAIL_COND(drawn_parent.is_null());
+	// Adding *to* an inherited machine is allowed -- adding is the only thing a child file
+	// can do, and it is where the stub for that machine comes from.
+	Ref<HSMState> parent = _authored_of(drawn_parent, true);
 	ERR_FAIL_COND(parent.is_null());
 
 	// A state becomes a machine by gaining a child. There is no separate button for it
 	// because there is no separate thing.
 	Ref<HSMState> spec;
 	spec.instantiate();
-	spec->set_state_name(_unique_child_name(parent));
+	// Named against what is drawn, not against what this file holds: a stub's children
+	// are only half of the machine, and the other half is where a clash would come from.
+	spec->set_state_name(_unique_child_name(drawn_parent));
 
 	TypedArray<HSMState> children = parent->get_children();
 	children.append(spec);
@@ -515,18 +607,36 @@ void HSMEditorView::_on_delete_pressed() {
 		return;
 	}
 	Ref<HSMState> spec = _selected_spec();
-	if (spec.is_null() || spec == hsm->get_root()) {
+	if (spec.is_null() || spec == merged_root) {
 		// The root is the machine itself; deleting it would leave the file with nothing.
 		return;
 	}
-	Ref<HSMState> machine = _machine_of(spec);
-	if (machine.is_null()) {
+	if (!_remove_drawn(spec)) {
 		return;
 	}
-	_detach_state(machine, spec);
 
 	refresh();
 	emit_signal("hsm_edited");
+}
+
+// Takes a drawn state out of the file that owns it, or refuses. Inherited states are not
+// removable here: what would change is the base file, and every machine that inherits it
+// would change with it -- on screen that reads as "I edited the boss".
+bool HSMEditorView::_remove_drawn(const Ref<HSMState> &p_drawn) {
+	if (p_drawn.is_null()) {
+		return false;
+	}
+	if (p_drawn->is_inherited()) {
+		WARN_PRINT(vformat("LimboAI: \"%s\" is inherited; remove it in the base machine.", p_drawn->get_state_name()));
+		return false;
+	}
+	Ref<HSMState> machine = _authored_of(_machine_of(p_drawn), true);
+	Ref<HSMState> spec = _authored_of(p_drawn, false);
+	if (machine.is_null() || spec.is_null()) {
+		return false;
+	}
+	_detach_state(machine, spec);
+	return true;
 }
 
 void HSMEditorView::_on_connection_request(const StringName &p_from, int p_from_port, const StringName &p_to, int p_to_port) {
@@ -557,16 +667,31 @@ void HSMEditorView::_on_connection_request(const StringName &p_from, int p_from_
 		return;
 	}
 
+	// The row goes in this file even when both ends are inherited -- that is what drawing
+	// an edge on a child machine means. Each end it reaches for gets a stub named after it.
+	Ref<HSMState> owner = _authored_of(machine, true);
+	Ref<HSMState> to_authored = _authored_of(to_entry->spec, true);
+	if (owner.is_null() || to_authored.is_null()) {
+		return;
+	}
+	Ref<HSMState> from_authored;
+	if (from_spec.is_valid()) {
+		from_authored = _authored_of(from_spec, true);
+		if (from_authored.is_null()) {
+			return;
+		}
+	}
+
 	Ref<HSMTransition> row;
 	row.instantiate();
-	row->set_from(from_spec);
-	row->set_to(to_entry->spec);
+	row->set_from(from_authored);
+	row->set_to(to_authored);
 	// The event is left empty on purpose -- it is the one thing the graph cannot guess,
 	// and the inspector shows it as the blank it is.
 
-	TypedArray<HSMTransition> rows = machine->get_transitions();
+	TypedArray<HSMTransition> rows = owner->get_transitions();
 	rows.append(row);
-	machine->set_transitions(rows);
+	owner->set_transitions(rows);
 
 	refresh();
 	emit_signal("hsm_edited");
@@ -582,14 +707,23 @@ void HSMEditorView::_on_disconnection_request(const StringName &p_from, int p_fr
 	}
 	const DrawnState *from_entry = drawn.getptr(p_from);
 	Ref<HSMState> from_spec = from_entry != nullptr ? from_entry->spec : Ref<HSMState>();
-	Ref<HSMState> machine = to_entry->machine;
+
+	// Looked for in this file only. A row that is drawn but not here came from the base,
+	// and cutting it here would cut it for every machine that inherits that base.
+	Ref<HSMState> machine = _authored_of(to_entry->machine, false);
+	Ref<HSMState> to_authored = _authored_of(to_entry->spec, false);
+	Ref<HSMState> from_authored = from_spec.is_valid() ? _authored_of(from_spec, false) : Ref<HSMState>();
+	if (machine.is_null() || to_authored.is_null() || (from_spec.is_valid() && from_authored.is_null())) {
+		WARN_PRINT("LimboAI: This transition is inherited; remove it in the base machine.");
+		return;
+	}
 
 	TypedArray<HSMTransition> rows = machine->get_transitions();
 	int found = -1;
 	int matches = 0;
 	for (int i = 0; i < rows.size(); i++) {
 		Ref<HSMTransition> row = rows[i];
-		if (row.is_valid() && row->get_to() == to_entry->spec && row->get_from() == from_spec) {
+		if (row.is_valid() && row->get_to() == to_authored && row->get_from() == from_authored) {
 			matches += 1;
 			found = i;
 		}
@@ -601,6 +735,7 @@ void HSMEditorView::_on_disconnection_request(const StringName &p_from, int p_fr
 		return;
 	}
 	if (found < 0) {
+		WARN_PRINT("LimboAI: This transition is inherited; remove it in the base machine.");
 		return;
 	}
 	rows.remove_at(found);
@@ -621,8 +756,7 @@ void HSMEditorView::_on_delete_nodes_request(const TypedArray<StringName> &p_nod
 		if (entry == nullptr) {
 			continue;
 		}
-		_detach_state(entry->machine, entry->spec);
-		removed = true;
+		removed = _remove_drawn(entry->spec) || removed;
 	}
 	if (removed) {
 		refresh();

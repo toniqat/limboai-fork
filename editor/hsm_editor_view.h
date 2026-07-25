@@ -61,6 +61,9 @@ private:
 	};
 
 	Ref<HierarchicalStateMachine> hsm;
+	// What is drawn: the file's own states with whatever it inherits already merged in.
+	// Every edit is made on the authored state behind a drawn one, never on the drawn one.
+	Ref<HSMState> merged_root;
 
 	VBoxContainer *list_box;
 	Label *list_title;
@@ -93,11 +96,15 @@ private:
 	void _on_graph_end_node_move();
 
 	void _drill_into(const Ref<HSMState> &p_state);
+	void _inspect(const Ref<HSMState> &p_drawn);
 
 	Ref<HSMState> _selected_spec() const;
 	Ref<HSMState> _machine_of(const Ref<HSMState> &p_state) const;
+	Ref<HSMState> _authored_of(const Ref<HSMState> &p_drawn, bool p_create);
 	StringName _unique_child_name(const Ref<HSMState> &p_machine) const;
 	void _detach_state(const Ref<HSMState> &p_machine, const Ref<HSMState> &p_state);
+
+	bool _remove_drawn(const Ref<HSMState> &p_drawn);
 
 	void _on_add_pressed();
 	void _on_delete_pressed();

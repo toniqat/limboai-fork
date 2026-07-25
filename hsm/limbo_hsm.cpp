@@ -171,7 +171,9 @@ void LimboHSM::build_from_resource() {
 	ERR_FAIL_COND_MSG(hsm.is_null(), "LimboHSM: No state machine resource to build from.");
 	ERR_FAIL_COND_MSG(built_from_resource, "LimboHSM: Already built from a resource.");
 
-	Ref<HSMState> root = hsm->get_root();
+	// The merged root, not the file's own: a machine that inherits gets its base's states
+	// laid out first and its own on top. Without a base the two are the same object.
+	Ref<HSMState> root = hsm->get_effective_root();
 	ERR_FAIL_COND_MSG(root.is_null(), vformat("LimboHSM: State machine resource has no root state: %s", hsm->get_path()));
 
 	built_from_resource = true;

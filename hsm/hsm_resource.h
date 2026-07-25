@@ -81,6 +81,14 @@ private:
 	TypedArray<HSMTransition> transitions;
 	Vector2 graph_position;
 
+	// Transient, and only ever set on the tree HierarchicalStateMachine::get_effective_root()
+	// builds -- neither is a property, so neither is written to a file. `origin` is the
+	// state *in the file being edited* that this one stands for, which is where an edit
+	// has to land; `inherited` says a base file contributed it. A state that is both is
+	// one the child overlays: the name and script are the base's, the children are not.
+	Ref<HSMState> origin;
+	bool inherited = false;
+
 protected:
 	static void _bind_methods();
 
@@ -106,6 +114,10 @@ public:
 	void set_graph_position(const Vector2 &p_position);
 	Vector2 get_graph_position() const { return graph_position; }
 
+	// The declared value, without get_initial_child()'s fall back to the first child.
+	// Merging needs to tell "this file says nothing" from "this file says the first one".
+	Ref<HSMState> get_declared_initial_child() const { return initial_child; }
+
 	// A state with children is a machine. Nothing else marks it.
 	bool is_machine() const { return children.size() > 0; }
 
@@ -113,6 +125,12 @@ public:
 	// the script's own base already answers the question -- deriving it twice would let
 	// the two answers disagree.
 	StringName resolve_base_type() const;
+
+	void set_origin(const Ref<HSMState> &p_state) { origin = p_state; }
+	Ref<HSMState> get_origin() const { return origin; }
+
+	void set_inherited(bool p_inherited) { inherited = p_inherited; }
+	bool is_inherited() const { return inherited; }
 
 	HSMState();
 	~HSMState();
@@ -126,6 +144,7 @@ class HierarchicalStateMachine : public Resource {
 private:
 	String description;
 	Ref<HSMState> root;
+	Ref<HierarchicalStateMachine> base;
 
 protected:
 	static void _bind_methods();
@@ -144,6 +163,23 @@ public:
 
 	void set_root(const Ref<HSMState> &p_state);
 	Ref<HSMState> get_root() const { return root; }
+
+	void set_base(const Ref<HierarchicalStateMachine> &p_base);
+	Ref<HierarchicalStateMachine> get_base() const { return base; }
+
+	// The machine as it actually runs: the base's states, plus whatever this file adds
+	// on top. Without a base this is `root` itself -- there is nothing to merge, and
+	// handing back a copy would make every edit land on something about to be thrown away.
+	//
+	// A child file can only add. What it says about a state the base already has, it says
+	// by naming it: inside one file a state is identified by reference, and across the
+	// boundary by name, because a sub-resource of another file cannot be referenced at all.
+	//
+	// WARNING: with a base this merges afresh on every call, so two calls hand back two
+	// unrelated trees. Ask once and hold the answer -- comparing a state from one against
+	// a transition from the other silently matches nothing, and a machine that inherits
+	// nothing returns `root` itself, so the mistake only shows on the ones that do.
+	Ref<HSMState> get_effective_root() const;
 
 	HierarchicalStateMachine();
 	~HierarchicalStateMachine();
