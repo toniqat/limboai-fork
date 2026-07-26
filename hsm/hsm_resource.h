@@ -30,19 +30,19 @@ using namespace godot;
 // A state machine described by a resource file, so that it has an original to draw
 // and edit while the game is not running -- the same thing BehaviorTree is for BT.
 //
-// The three classes live in one header because HSMTransition refers to HSMState and
-// HSMState owns HSMTransition: splitting them would need a forward declaration whose
+// The three classes live in one header because HSMTransition refers to HSMStateSpec and
+// HSMStateSpec owns HSMTransition: splitting them would need a forward declaration whose
 // only purpose is to undo the split.
 
-class HSMState;
+class HSMStateSpec;
 
 // One edge. A null `from` means ANYSTATE -- "there is no state being left".
 class HSMTransition : public Resource {
 	GDCLASS(HSMTransition, Resource);
 
 private:
-	Ref<HSMState> from;
-	Ref<HSMState> to;
+	Ref<HSMStateSpec> from;
+	Ref<HSMStateSpec> to;
 	StringName event;
 	String note;
 
@@ -50,11 +50,11 @@ protected:
 	static void _bind_methods();
 
 public:
-	void set_from(const Ref<HSMState> &p_state);
-	Ref<HSMState> get_from() const;
+	void set_from(const Ref<HSMStateSpec> &p_state);
+	Ref<HSMStateSpec> get_from() const;
 
-	void set_to(const Ref<HSMState> &p_state);
-	Ref<HSMState> get_to() const;
+	void set_to(const Ref<HSMStateSpec> &p_state);
+	Ref<HSMStateSpec> get_to() const;
 
 	void set_event(const StringName &p_event);
 	StringName get_event() const { return event; }
@@ -69,15 +69,15 @@ public:
 // One state. A state that has children is a machine -- there is no separate type for
 // nesting, which is what makes "a state may contain a behavior tree" and "a state may
 // contain other states" the same sentence.
-class HSMState : public Resource {
-	GDCLASS(HSMState, Resource);
+class HSMStateSpec : public Resource {
+	GDCLASS(HSMStateSpec, Resource);
 
 private:
 	StringName state_name = "State";
 	Ref<Script> state_script;
 	Ref<BehaviorTree> behavior_tree;
-	TypedArray<HSMState> children;
-	Ref<HSMState> initial_child;
+	TypedArray<HSMStateSpec> children;
+	Ref<HSMStateSpec> initial_child;
 	TypedArray<HSMTransition> transitions;
 	Vector2 graph_position;
 	// Only a machine's node has one, and only when it was resized by hand: its size is
@@ -90,7 +90,7 @@ private:
 	// state *in the file being edited* that this one stands for, which is where an edit
 	// has to land; `inherited` says a base file contributed it. A state that is both is
 	// one the child overlays: the name and script are the base's, the children are not.
-	Ref<HSMState> origin;
+	Ref<HSMStateSpec> origin;
 	bool inherited = false;
 
 protected:
@@ -106,11 +106,11 @@ public:
 	void set_behavior_tree(const Ref<BehaviorTree> &p_tree);
 	Ref<BehaviorTree> get_behavior_tree() const { return behavior_tree; }
 
-	void set_children(const TypedArray<HSMState> &p_children);
-	TypedArray<HSMState> get_children() const { return children; }
+	void set_children(const TypedArray<HSMStateSpec> &p_children);
+	TypedArray<HSMStateSpec> get_children() const { return children; }
 
-	void set_initial_child(const Ref<HSMState> &p_state);
-	Ref<HSMState> get_initial_child() const;
+	void set_initial_child(const Ref<HSMStateSpec> &p_state);
+	Ref<HSMStateSpec> get_initial_child() const;
 
 	void set_transitions(const TypedArray<HSMTransition> &p_transitions);
 	TypedArray<HSMTransition> get_transitions() const { return transitions; }
@@ -123,7 +123,7 @@ public:
 
 	// The declared value, without get_initial_child()'s fall back to the first child.
 	// Merging needs to tell "this file says nothing" from "this file says the first one".
-	Ref<HSMState> get_declared_initial_child() const { return initial_child; }
+	Ref<HSMStateSpec> get_declared_initial_child() const { return initial_child; }
 
 	// A state with children is a machine. Nothing else marks it.
 	bool is_machine() const { return children.size() > 0; }
@@ -133,14 +133,14 @@ public:
 	// the two answers disagree.
 	StringName resolve_base_type() const;
 
-	void set_origin(const Ref<HSMState> &p_state) { origin = p_state; }
-	Ref<HSMState> get_origin() const { return origin; }
+	void set_origin(const Ref<HSMStateSpec> &p_state) { origin = p_state; }
+	Ref<HSMStateSpec> get_origin() const { return origin; }
 
 	void set_inherited(bool p_inherited) { inherited = p_inherited; }
 	bool is_inherited() const { return inherited; }
 
-	HSMState();
-	~HSMState();
+	HSMStateSpec();
+	~HSMStateSpec();
 };
 
 // The file. Holds the root state, whose children become the children of the LimboHSM
@@ -150,7 +150,7 @@ class HierarchicalStateMachine : public Resource {
 
 private:
 	String description;
-	Ref<HSMState> root;
+	Ref<HSMStateSpec> root;
 	Ref<HierarchicalStateMachine> base;
 
 protected:
@@ -168,8 +168,8 @@ public:
 	void set_description(const String &p_value);
 	String get_description() const { return description; }
 
-	void set_root(const Ref<HSMState> &p_state);
-	Ref<HSMState> get_root() const { return root; }
+	void set_root(const Ref<HSMStateSpec> &p_state);
+	Ref<HSMStateSpec> get_root() const { return root; }
 
 	void set_base(const Ref<HierarchicalStateMachine> &p_base);
 	Ref<HierarchicalStateMachine> get_base() const { return base; }
@@ -186,7 +186,7 @@ public:
 	// unrelated trees. Ask once and hold the answer -- comparing a state from one against
 	// a transition from the other silently matches nothing, and a machine that inherits
 	// nothing returns `root` itself, so the mistake only shows on the ones that do.
-	Ref<HSMState> get_effective_root() const;
+	Ref<HSMStateSpec> get_effective_root() const;
 
 	HierarchicalStateMachine();
 	~HierarchicalStateMachine();

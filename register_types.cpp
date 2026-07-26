@@ -150,7 +150,7 @@ void initialize_limboai_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(LimboHSM);
 
 		GDREGISTER_CLASS(HSMTransition);
-		GDREGISTER_CLASS(HSMState);
+		GDREGISTER_CLASS(HSMStateSpec);
 		GDREGISTER_CLASS(HierarchicalStateMachine);
 
 		GDREGISTER_ABSTRACT_CLASS(BT);

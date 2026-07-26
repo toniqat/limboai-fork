@@ -30,7 +30,7 @@ void LimboHSM::set_hsm(const Ref<HierarchicalStateMachine> &p_hsm) {
 	hsm = p_hsm;
 }
 
-LimboState *LimboHSM::_create_state_node(const Ref<HSMState> &p_spec) {
+LimboState *LimboHSM::_create_state_node(const Ref<HSMStateSpec> &p_spec) {
 	ERR_FAIL_COND_V(p_spec.is_null(), nullptr);
 
 	StringName base_type = p_spec->resolve_base_type();
@@ -77,13 +77,13 @@ LimboState *LimboHSM::_create_state_node(const Ref<HSMState> &p_spec) {
 	return state;
 }
 
-void LimboHSM::_instantiate_states(const Ref<HSMState> &p_spec, LimboHSM *p_machine, HashMap<uint64_t, LimboState *> &r_nodes) {
+void LimboHSM::_instantiate_states(const Ref<HSMStateSpec> &p_spec, LimboHSM *p_machine, HashMap<uint64_t, LimboState *> &r_nodes) {
 	ERR_FAIL_COND(p_spec.is_null());
 	ERR_FAIL_NULL(p_machine);
 
-	TypedArray<HSMState> children = p_spec->get_children();
+	TypedArray<HSMStateSpec> children = p_spec->get_children();
 	for (int i = 0; i < children.size(); i++) {
-		Ref<HSMState> spec = children[i];
+		Ref<HSMStateSpec> spec = children[i];
 		if (spec.is_null()) {
 			ERR_PRINT(vformat("LimboHSM: State \"%s\" has an empty child slot at %d.", p_spec->get_state_name(), i));
 			continue;
@@ -107,7 +107,7 @@ void LimboHSM::_instantiate_states(const Ref<HSMState> &p_spec, LimboHSM *p_mach
 		}
 	}
 
-	Ref<HSMState> initial = p_spec->get_initial_child();
+	Ref<HSMStateSpec> initial = p_spec->get_initial_child();
 	if (initial.is_valid()) {
 		LimboState *const *found = r_nodes.getptr(initial->get_instance_id());
 		if (found != nullptr) {
@@ -118,7 +118,7 @@ void LimboHSM::_instantiate_states(const Ref<HSMState> &p_spec, LimboHSM *p_mach
 	}
 }
 
-void LimboHSM::_wire_transitions(const Ref<HSMState> &p_spec, LimboHSM *p_machine, const HashMap<uint64_t, LimboState *> &p_nodes) {
+void LimboHSM::_wire_transitions(const Ref<HSMStateSpec> &p_spec, LimboHSM *p_machine, const HashMap<uint64_t, LimboState *> &p_nodes) {
 	ERR_FAIL_COND(p_spec.is_null());
 	ERR_FAIL_NULL(p_machine);
 
@@ -128,7 +128,7 @@ void LimboHSM::_wire_transitions(const Ref<HSMState> &p_spec, LimboHSM *p_machin
 		if (row.is_null()) {
 			continue;
 		}
-		Ref<HSMState> to_spec = row->get_to();
+		Ref<HSMStateSpec> to_spec = row->get_to();
 		if (to_spec.is_null()) {
 			ERR_PRINT(vformat("LimboHSM: A transition of \"%s\" has no destination.", p_spec->get_state_name()));
 			continue;
@@ -141,7 +141,7 @@ void LimboHSM::_wire_transitions(const Ref<HSMState> &p_spec, LimboHSM *p_machin
 
 		// An empty `from` is ANYSTATE -- there is no state being left.
 		LimboState *from = nullptr;
-		Ref<HSMState> from_spec = row->get_from();
+		Ref<HSMStateSpec> from_spec = row->get_from();
 		if (from_spec.is_valid()) {
 			LimboState *const *found = p_nodes.getptr(from_spec->get_instance_id());
 			if (found == nullptr) {
@@ -153,9 +153,9 @@ void LimboHSM::_wire_transitions(const Ref<HSMState> &p_spec, LimboHSM *p_machin
 		p_machine->add_transition(from, *to, row->get_event());
 	}
 
-	TypedArray<HSMState> children = p_spec->get_children();
+	TypedArray<HSMStateSpec> children = p_spec->get_children();
 	for (int i = 0; i < children.size(); i++) {
-		Ref<HSMState> spec = children[i];
+		Ref<HSMStateSpec> spec = children[i];
 		if (spec.is_null() || !spec->is_machine()) {
 			continue;
 		}
@@ -173,7 +173,7 @@ void LimboHSM::build_from_resource() {
 
 	// The merged root, not the file's own: a machine that inherits gets its base's states
 	// laid out first and its own on top. Without a base the two are the same object.
-	Ref<HSMState> root = hsm->get_effective_root();
+	Ref<HSMStateSpec> root = hsm->get_effective_root();
 	ERR_FAIL_COND_MSG(root.is_null(), vformat("LimboHSM: State machine resource has no root state: %s", hsm->get_path()));
 
 	built_from_resource = true;

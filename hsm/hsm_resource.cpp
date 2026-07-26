@@ -29,21 +29,21 @@
 
 //**** HSMTransition
 
-void HSMTransition::set_from(const Ref<HSMState> &p_state) {
+void HSMTransition::set_from(const Ref<HSMStateSpec> &p_state) {
 	from = p_state;
 	emit_changed();
 }
 
-Ref<HSMState> HSMTransition::get_from() const {
+Ref<HSMStateSpec> HSMTransition::get_from() const {
 	return from;
 }
 
-void HSMTransition::set_to(const Ref<HSMState> &p_state) {
+void HSMTransition::set_to(const Ref<HSMStateSpec> &p_state) {
 	to = p_state;
 	emit_changed();
 }
 
-Ref<HSMState> HSMTransition::get_to() const {
+Ref<HSMStateSpec> HSMTransition::get_to() const {
 	return to;
 }
 
@@ -67,8 +67,8 @@ void HSMTransition::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_note", "note"), &HSMTransition::set_note);
 	ClassDB::bind_method(D_METHOD("get_note"), &HSMTransition::get_note);
 
-	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "from", PROPERTY_HINT_RESOURCE_TYPE, "HSMState"), "set_from", "get_from");
-	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "to", PROPERTY_HINT_RESOURCE_TYPE, "HSMState"), "set_to", "get_to");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "from", PROPERTY_HINT_RESOURCE_TYPE, "HSMStateSpec"), "set_from", "get_from");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "to", PROPERTY_HINT_RESOURCE_TYPE, "HSMStateSpec"), "set_to", "get_to");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "event"), "set_event", "get_event");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "note", PROPERTY_HINT_MULTILINE_TEXT), "set_note", "get_note");
 }
@@ -79,34 +79,34 @@ HSMTransition::HSMTransition() {
 HSMTransition::~HSMTransition() {
 }
 
-//**** HSMState
+//**** HSMStateSpec
 
-void HSMState::set_state_name(const StringName &p_name) {
+void HSMStateSpec::set_state_name(const StringName &p_name) {
 	state_name = p_name;
 	emit_changed();
 }
 
-void HSMState::set_state_script(const Ref<Script> &p_script) {
+void HSMStateSpec::set_state_script(const Ref<Script> &p_script) {
 	state_script = p_script;
 	emit_changed();
 }
 
-void HSMState::set_behavior_tree(const Ref<BehaviorTree> &p_tree) {
+void HSMStateSpec::set_behavior_tree(const Ref<BehaviorTree> &p_tree) {
 	behavior_tree = p_tree;
 	emit_changed();
 }
 
-void HSMState::set_children(const TypedArray<HSMState> &p_children) {
+void HSMStateSpec::set_children(const TypedArray<HSMStateSpec> &p_children) {
 	children = p_children;
 	emit_changed();
 }
 
-void HSMState::set_initial_child(const Ref<HSMState> &p_state) {
+void HSMStateSpec::set_initial_child(const Ref<HSMStateSpec> &p_state) {
 	initial_child = p_state;
 	emit_changed();
 }
 
-Ref<HSMState> HSMState::get_initial_child() const {
+Ref<HSMStateSpec> HSMStateSpec::get_initial_child() const {
 	// Falling back to the first child keeps "a machine always has somewhere to start"
 	// out of every caller. LimboHSM would otherwise refuse to activate.
 	if (initial_child.is_valid()) {
@@ -118,22 +118,22 @@ Ref<HSMState> HSMState::get_initial_child() const {
 	return nullptr;
 }
 
-void HSMState::set_transitions(const TypedArray<HSMTransition> &p_transitions) {
+void HSMStateSpec::set_transitions(const TypedArray<HSMTransition> &p_transitions) {
 	transitions = p_transitions;
 	emit_changed();
 }
 
-void HSMState::set_graph_position(const Vector2 &p_position) {
+void HSMStateSpec::set_graph_position(const Vector2 &p_position) {
 	graph_position = p_position;
 	emit_changed();
 }
 
-void HSMState::set_graph_size(const Vector2 &p_size) {
+void HSMStateSpec::set_graph_size(const Vector2 &p_size) {
 	graph_size = p_size;
 	emit_changed();
 }
 
-StringName HSMState::resolve_base_type() const {
+StringName HSMStateSpec::resolve_base_type() const {
 	if (state_script.is_valid()) {
 		StringName base = state_script->get_instance_base_type();
 		if (base == StringName()) {
@@ -155,49 +155,49 @@ StringName HSMState::resolve_base_type() const {
 	return "LimboState";
 }
 
-void HSMState::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("set_state_name", "name"), &HSMState::set_state_name);
-	ClassDB::bind_method(D_METHOD("get_state_name"), &HSMState::get_state_name);
-	ClassDB::bind_method(D_METHOD("set_state_script", "script"), &HSMState::set_state_script);
-	ClassDB::bind_method(D_METHOD("get_state_script"), &HSMState::get_state_script);
-	ClassDB::bind_method(D_METHOD("set_behavior_tree", "behavior_tree"), &HSMState::set_behavior_tree);
-	ClassDB::bind_method(D_METHOD("get_behavior_tree"), &HSMState::get_behavior_tree);
-	ClassDB::bind_method(D_METHOD("set_children", "children"), &HSMState::set_children);
-	ClassDB::bind_method(D_METHOD("get_children"), &HSMState::get_children);
-	ClassDB::bind_method(D_METHOD("set_initial_child", "state"), &HSMState::set_initial_child);
-	ClassDB::bind_method(D_METHOD("get_initial_child"), &HSMState::get_initial_child);
-	ClassDB::bind_method(D_METHOD("set_transitions", "transitions"), &HSMState::set_transitions);
-	ClassDB::bind_method(D_METHOD("get_transitions"), &HSMState::get_transitions);
-	ClassDB::bind_method(D_METHOD("set_graph_position", "position"), &HSMState::set_graph_position);
-	ClassDB::bind_method(D_METHOD("get_graph_position"), &HSMState::get_graph_position);
-	ClassDB::bind_method(D_METHOD("set_graph_size", "size"), &HSMState::set_graph_size);
-	ClassDB::bind_method(D_METHOD("get_graph_size"), &HSMState::get_graph_size);
-	ClassDB::bind_method(D_METHOD("is_machine"), &HSMState::is_machine);
-	ClassDB::bind_method(D_METHOD("resolve_base_type"), &HSMState::resolve_base_type);
-	ClassDB::bind_method(D_METHOD("get_declared_initial_child"), &HSMState::get_declared_initial_child);
+void HSMStateSpec::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("set_state_name", "name"), &HSMStateSpec::set_state_name);
+	ClassDB::bind_method(D_METHOD("get_state_name"), &HSMStateSpec::get_state_name);
+	ClassDB::bind_method(D_METHOD("set_state_script", "script"), &HSMStateSpec::set_state_script);
+	ClassDB::bind_method(D_METHOD("get_state_script"), &HSMStateSpec::get_state_script);
+	ClassDB::bind_method(D_METHOD("set_behavior_tree", "behavior_tree"), &HSMStateSpec::set_behavior_tree);
+	ClassDB::bind_method(D_METHOD("get_behavior_tree"), &HSMStateSpec::get_behavior_tree);
+	ClassDB::bind_method(D_METHOD("set_children", "children"), &HSMStateSpec::set_children);
+	ClassDB::bind_method(D_METHOD("get_children"), &HSMStateSpec::get_children);
+	ClassDB::bind_method(D_METHOD("set_initial_child", "state"), &HSMStateSpec::set_initial_child);
+	ClassDB::bind_method(D_METHOD("get_initial_child"), &HSMStateSpec::get_initial_child);
+	ClassDB::bind_method(D_METHOD("set_transitions", "transitions"), &HSMStateSpec::set_transitions);
+	ClassDB::bind_method(D_METHOD("get_transitions"), &HSMStateSpec::get_transitions);
+	ClassDB::bind_method(D_METHOD("set_graph_position", "position"), &HSMStateSpec::set_graph_position);
+	ClassDB::bind_method(D_METHOD("get_graph_position"), &HSMStateSpec::get_graph_position);
+	ClassDB::bind_method(D_METHOD("set_graph_size", "size"), &HSMStateSpec::set_graph_size);
+	ClassDB::bind_method(D_METHOD("get_graph_size"), &HSMStateSpec::get_graph_size);
+	ClassDB::bind_method(D_METHOD("is_machine"), &HSMStateSpec::is_machine);
+	ClassDB::bind_method(D_METHOD("resolve_base_type"), &HSMStateSpec::resolve_base_type);
+	ClassDB::bind_method(D_METHOD("get_declared_initial_child"), &HSMStateSpec::get_declared_initial_child);
 	// Neither is a property: both only mean something on the tree get_effective_root()
 	// builds, and a merged tree is never the thing that gets written to a file.
-	ClassDB::bind_method(D_METHOD("get_origin"), &HSMState::get_origin);
-	ClassDB::bind_method(D_METHOD("is_inherited"), &HSMState::is_inherited);
+	ClassDB::bind_method(D_METHOD("get_origin"), &HSMStateSpec::get_origin);
+	ClassDB::bind_method(D_METHOD("is_inherited"), &HSMStateSpec::is_inherited);
 
 	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "state_name"), "set_state_name", "get_state_name");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "state_script", PROPERTY_HINT_RESOURCE_TYPE, "Script"), "set_state_script", "get_state_script");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "behavior_tree", PROPERTY_HINT_RESOURCE_TYPE, "BehaviorTree"), "set_behavior_tree", "get_behavior_tree");
-	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "children", PROPERTY_HINT_ARRAY_TYPE, RESOURCE_TYPE_HINT("HSMState")), "set_children", "get_children");
+	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "children", PROPERTY_HINT_ARRAY_TYPE, RESOURCE_TYPE_HINT("HSMStateSpec")), "set_children", "get_children");
 	// Read through the declared value, not get_initial_child(): the fall back to the first
 	// child is an answer for whoever runs the machine, and writing it into a file would
 	// turn "this file says nothing" into "this file says the first one" the moment it is
 	// saved -- which is exactly what an inheriting file must be able to stay silent about.
-	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "initial_child", PROPERTY_HINT_RESOURCE_TYPE, "HSMState"), "set_initial_child", "get_declared_initial_child");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "initial_child", PROPERTY_HINT_RESOURCE_TYPE, "HSMStateSpec"), "set_initial_child", "get_declared_initial_child");
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "transitions", PROPERTY_HINT_ARRAY_TYPE, RESOURCE_TYPE_HINT("HSMTransition")), "set_transitions", "get_transitions");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2, "graph_position"), "set_graph_position", "get_graph_position");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2, "graph_size"), "set_graph_size", "get_graph_size");
 }
 
-HSMState::HSMState() {
+HSMStateSpec::HSMStateSpec() {
 }
 
-HSMState::~HSMState() {
+HSMStateSpec::~HSMStateSpec() {
 }
 
 //**** HierarchicalStateMachine
@@ -207,7 +207,7 @@ void HierarchicalStateMachine::set_description(const String &p_value) {
 	emit_changed();
 }
 
-void HierarchicalStateMachine::set_root(const Ref<HSMState> &p_state) {
+void HierarchicalStateMachine::set_root(const Ref<HSMStateSpec> &p_state) {
 	root = p_state;
 	emit_changed();
 }
@@ -223,14 +223,14 @@ namespace {
 // transitions land in that order too: the base's rows come first, and what the child adds
 // is layered on top -- which is the shape of inheritance, not an accident of iteration.
 struct MergePair {
-	Ref<HSMState> merged;
-	Ref<HSMState> authored;
+	Ref<HSMStateSpec> merged;
+	Ref<HSMStateSpec> authored;
 };
 
 // Copies the values of one state. Children, transitions and initial_child are left out:
 // they are references, and references are rebuilt afterwards through the identity map.
-Ref<HSMState> _copy_values(const Ref<HSMState> &p_src) {
-	Ref<HSMState> out;
+Ref<HSMStateSpec> _copy_values(const Ref<HSMStateSpec> &p_src) {
+	Ref<HSMStateSpec> out;
 	out.instantiate();
 	out->set_state_name(p_src->get_state_name());
 	out->set_state_script(p_src->get_state_script());
@@ -241,12 +241,12 @@ Ref<HSMState> _copy_values(const Ref<HSMState> &p_src) {
 }
 
 // Clones `p_src` and everything under it onto `p_dst_parent`.
-void _graft(const Ref<HSMState> &p_src, const Ref<HSMState> &p_dst_parent, bool p_inherited,
-		HashMap<uint64_t, Ref<HSMState>> &r_map, Vector<MergePair> &r_pairs) {
+void _graft(const Ref<HSMStateSpec> &p_src, const Ref<HSMStateSpec> &p_dst_parent, bool p_inherited,
+		HashMap<uint64_t, Ref<HSMStateSpec>> &r_map, Vector<MergePair> &r_pairs) {
 	if (p_src.is_null() || r_map.has(p_src->get_instance_id())) {
 		return;
 	}
-	Ref<HSMState> copy = _copy_values(p_src);
+	Ref<HSMStateSpec> copy = _copy_values(p_src);
 	copy->set_inherited(p_inherited);
 	if (!p_inherited) {
 		copy->set_origin(p_src);
@@ -255,20 +255,20 @@ void _graft(const Ref<HSMState> &p_src, const Ref<HSMState> &p_dst_parent, bool 
 	r_pairs.push_back(MergePair{ copy, p_src });
 
 	if (p_dst_parent.is_valid()) {
-		TypedArray<HSMState> siblings = p_dst_parent->get_children();
+		TypedArray<HSMStateSpec> siblings = p_dst_parent->get_children();
 		siblings.append(copy);
 		p_dst_parent->set_children(siblings);
 	}
 
-	TypedArray<HSMState> children = p_src->get_children();
+	TypedArray<HSMStateSpec> children = p_src->get_children();
 	for (int i = 0; i < children.size(); i++) {
 		_graft(children[i], copy, p_inherited, r_map, r_pairs);
 	}
 }
 
 // Lays what the child file says about an inherited state on top of the copy of it.
-void _overlay(const Ref<HSMState> &p_dst, const Ref<HSMState> &p_src,
-		HashMap<uint64_t, Ref<HSMState>> &r_map, Vector<MergePair> &r_pairs) {
+void _overlay(const Ref<HSMStateSpec> &p_dst, const Ref<HSMStateSpec> &p_src,
+		HashMap<uint64_t, Ref<HSMStateSpec>> &r_map, Vector<MergePair> &r_pairs) {
 	if (p_dst.is_null() || p_src.is_null() || r_map.has(p_src->get_instance_id())) {
 		return;
 	}
@@ -293,16 +293,16 @@ void _overlay(const Ref<HSMState> &p_dst, const Ref<HSMState> &p_src,
 		p_dst->set_graph_size(p_src->get_graph_size());
 	}
 
-	TypedArray<HSMState> src_children = p_src->get_children();
+	TypedArray<HSMStateSpec> src_children = p_src->get_children();
 	for (int i = 0; i < src_children.size(); i++) {
-		Ref<HSMState> child = src_children[i];
+		Ref<HSMStateSpec> child = src_children[i];
 		if (child.is_null()) {
 			continue;
 		}
-		Ref<HSMState> match;
-		TypedArray<HSMState> dst_children = p_dst->get_children();
+		Ref<HSMStateSpec> match;
+		TypedArray<HSMStateSpec> dst_children = p_dst->get_children();
 		for (int j = 0; j < dst_children.size(); j++) {
-			Ref<HSMState> candidate = dst_children[j];
+			Ref<HSMStateSpec> candidate = dst_children[j];
 			if (candidate.is_valid() && candidate->get_state_name() == child->get_state_name()) {
 				match = candidate;
 				break;
@@ -318,7 +318,7 @@ void _overlay(const Ref<HSMState> &p_dst, const Ref<HSMState> &p_src,
 
 } // namespace
 
-Ref<HSMState> HierarchicalStateMachine::get_effective_root() const {
+Ref<HSMStateSpec> HierarchicalStateMachine::get_effective_root() const {
 	if (base.is_null()) {
 		return root;
 	}
@@ -338,20 +338,20 @@ Ref<HSMState> HierarchicalStateMachine::get_effective_root() const {
 		}
 	}
 
-	Ref<HSMState> base_root = base->get_effective_root();
+	Ref<HSMStateSpec> base_root = base->get_effective_root();
 	if (base_root.is_null()) {
 		ERR_PRINT(vformat("HierarchicalStateMachine: `base` has no root state: %s", get_path()));
 		return root;
 	}
 
-	HashMap<uint64_t, Ref<HSMState>> map;
+	HashMap<uint64_t, Ref<HSMStateSpec>> map;
 	Vector<MergePair> pairs;
 
-	Ref<HSMState> merged = _copy_values(base_root);
+	Ref<HSMStateSpec> merged = _copy_values(base_root);
 	merged->set_inherited(true);
 	map[base_root->get_instance_id()] = merged;
 	pairs.push_back(MergePair{ merged, base_root });
-	TypedArray<HSMState> base_children = base_root->get_children();
+	TypedArray<HSMStateSpec> base_children = base_root->get_children();
 	for (int i = 0; i < base_children.size(); i++) {
 		_graft(base_children[i], merged, true, map, pairs);
 	}
@@ -371,15 +371,15 @@ Ref<HSMState> HierarchicalStateMachine::get_effective_root() const {
 			if (row.is_null() || row->get_to().is_null()) {
 				continue;
 			}
-			Ref<HSMState> *to = map.getptr(row->get_to()->get_instance_id());
+			Ref<HSMStateSpec> *to = map.getptr(row->get_to()->get_instance_id());
 			if (to == nullptr) {
 				ERR_PRINT(vformat("HierarchicalStateMachine: A transition of \"%s\" points at \"%s\", which is not in this machine.",
 						pair.authored->get_state_name(), row->get_to()->get_state_name()));
 				continue;
 			}
-			Ref<HSMState> from;
+			Ref<HSMStateSpec> from;
 			if (row->get_from().is_valid()) {
-				Ref<HSMState> *found = map.getptr(row->get_from()->get_instance_id());
+				Ref<HSMStateSpec> *found = map.getptr(row->get_from()->get_instance_id());
 				if (found == nullptr) {
 					ERR_PRINT(vformat("HierarchicalStateMachine: A transition of \"%s\" leaves \"%s\", which is not in this machine.",
 							pair.authored->get_state_name(), row->get_from()->get_state_name()));
@@ -397,9 +397,9 @@ Ref<HSMState> HierarchicalStateMachine::get_effective_root() const {
 		}
 		pair.merged->set_transitions(out);
 
-		Ref<HSMState> initial = pair.authored->get_declared_initial_child();
+		Ref<HSMStateSpec> initial = pair.authored->get_declared_initial_child();
 		if (initial.is_valid()) {
-			Ref<HSMState> *found = map.getptr(initial->get_instance_id());
+			Ref<HSMStateSpec> *found = map.getptr(initial->get_instance_id());
 			if (found != nullptr) {
 				pair.merged->set_initial_child(*found);
 			}
@@ -419,7 +419,7 @@ void HierarchicalStateMachine::_bind_methods() {
 
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "description", PROPERTY_HINT_MULTILINE_TEXT), "set_description", "get_description");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "base", PROPERTY_HINT_RESOURCE_TYPE, "HierarchicalStateMachine"), "set_base", "get_base");
-	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "root", PROPERTY_HINT_RESOURCE_TYPE, "HSMState"), "set_root", "get_root");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "root", PROPERTY_HINT_RESOURCE_TYPE, "HSMStateSpec"), "set_root", "get_root");
 }
 
 HierarchicalStateMachine::HierarchicalStateMachine() {

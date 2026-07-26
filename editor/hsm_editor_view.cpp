@@ -79,23 +79,23 @@ const float INHERITED_ALPHA = 0.55;
 // every state on both sides exists -- the same two passes the merge in hsm_resource.cpp
 // takes, and for the same reason: a transition names states that may not be copied yet.
 struct ClonePair {
-	Ref<HSMState> src;
-	Ref<HSMState> copy;
+	Ref<HSMStateSpec> src;
+	Ref<HSMStateSpec> copy;
 };
 
-Ref<HSMState> _mapped(const HashMap<uint64_t, Ref<HSMState>> &p_map, const Ref<HSMState> &p_state) {
+Ref<HSMStateSpec> _mapped(const HashMap<uint64_t, Ref<HSMStateSpec>> &p_map, const Ref<HSMStateSpec> &p_state) {
 	if (p_state.is_null()) {
 		return nullptr;
 	}
-	const Ref<HSMState> *found = p_map.getptr(p_state->get_instance_id());
+	const Ref<HSMStateSpec> *found = p_map.getptr(p_state->get_instance_id());
 	// A reference to something outside the tree is handed on as it stands. It is already
 	// broken, and a copy that quietly dropped it would make an undo lose more than it
 	// restores.
 	return found != nullptr ? *found : p_state;
 }
 
-Ref<HSMState> _clone_state(const Ref<HSMState> &p_src, HashMap<uint64_t, Ref<HSMState>> &r_map, Vector<ClonePair> &r_pairs) {
-	Ref<HSMState> copy;
+Ref<HSMStateSpec> _clone_state(const Ref<HSMStateSpec> &p_src, HashMap<uint64_t, Ref<HSMStateSpec>> &r_map, Vector<ClonePair> &r_pairs) {
+	Ref<HSMStateSpec> copy;
 	copy.instantiate();
 	// Carried over, and this is the point of doing the copy by hand at all: the id is what
 	// names a sub-resource in the file, so a copy that took a fresh one would rename every
@@ -109,10 +109,10 @@ Ref<HSMState> _clone_state(const Ref<HSMState> &p_src, HashMap<uint64_t, Ref<HSM
 	r_map[p_src->get_instance_id()] = copy;
 	r_pairs.push_back(ClonePair{ p_src, copy });
 
-	TypedArray<HSMState> children = p_src->get_children();
-	TypedArray<HSMState> out;
+	TypedArray<HSMStateSpec> children = p_src->get_children();
+	TypedArray<HSMStateSpec> out;
 	for (int i = 0; i < children.size(); i++) {
-		Ref<HSMState> child = children[i];
+		Ref<HSMStateSpec> child = children[i];
 		if (child.is_null() || r_map.has(child->get_instance_id())) {
 			continue;
 		}
@@ -127,13 +127,13 @@ Ref<HSMState> _clone_state(const Ref<HSMState> &p_src, HashMap<uint64_t, Ref<HSM
 // Not duplicate(true): a resource sitting in an Array comes back as the same object, so
 // `children` and `transitions` would point straight back at the states the copy is meant to
 // be safe from -- and the first edit after an undo would reach into the undo history.
-Ref<HSMState> _clone_tree(const Ref<HSMState> &p_root) {
+Ref<HSMStateSpec> _clone_tree(const Ref<HSMStateSpec> &p_root) {
 	if (p_root.is_null()) {
 		return nullptr;
 	}
-	HashMap<uint64_t, Ref<HSMState>> map;
+	HashMap<uint64_t, Ref<HSMStateSpec>> map;
 	Vector<ClonePair> pairs;
-	Ref<HSMState> root = _clone_state(p_root, map, pairs);
+	Ref<HSMStateSpec> root = _clone_state(p_root, map, pairs);
 
 	for (int i = 0; i < pairs.size(); i++) {
 		const ClonePair &pair = pairs[i];
@@ -163,13 +163,13 @@ Ref<HSMState> _clone_tree(const Ref<HSMState> &p_root) {
 
 } // namespace
 
-StringName HSMEditorView::_node_name_for(const Ref<HSMState> &p_state) {
+StringName HSMEditorView::_node_name_for(const Ref<HSMStateSpec> &p_state) {
 	// The instance id, not the state name: names are only unique among siblings, and
 	// GraphEdit needs one name per node across the whole graph.
 	return StringName(itos(p_state->get_instance_id()));
 }
 
-StringName HSMEditorView::_anystate_node_name_for(const Ref<HSMState> &p_machine) {
+StringName HSMEditorView::_anystate_node_name_for(const Ref<HSMStateSpec> &p_machine) {
 	return StringName("any_" + itos(p_machine->get_instance_id()));
 }
 
@@ -191,7 +191,7 @@ void HSMEditorView::_hide_ports(GraphNode *p_node) {
 // What it says inside is then the states themselves. The word "machine (4)" was standing
 // in for a picture that could not be drawn; there is no reason to keep the caption once
 // the picture is there.
-GraphNode *HSMEditorView::_make_node(const Ref<HSMState> &p_state, const Ref<HSMState> &p_machine, int p_depth, int p_row, bool p_nests, Control **r_content) {
+GraphNode *HSMEditorView::_make_node(const Ref<HSMStateSpec> &p_state, const Ref<HSMStateSpec> &p_machine, int p_depth, int p_row, bool p_nests, Control **r_content) {
 	GraphNode *node = nullptr;
 	if (p_nests) {
 		// A box, and a box is a thing with a hole in it -- see HSMNestNode. It is also the
@@ -262,7 +262,7 @@ GraphNode *HSMEditorView::_make_node(const Ref<HSMState> &p_state, const Ref<HSM
 	return node;
 }
 
-GraphNode *HSMEditorView::_make_anystate_node(const Ref<HSMState> &p_machine, int p_depth, int p_row) {
+GraphNode *HSMEditorView::_make_anystate_node(const Ref<HSMStateSpec> &p_machine, int p_depth, int p_row) {
 	GraphNode *node = memnew(GraphNode);
 	node->set_name(_anystate_node_name_for(p_machine));
 	node->set_title(String::utf8("✱ ANYSTATE"));
@@ -283,7 +283,7 @@ GraphNode *HSMEditorView::_make_anystate_node(const Ref<HSMState> &p_machine, in
 	return node;
 }
 
-Vector<GraphNode *> HSMEditorView::_populate_graph(const Ref<HSMState> &p_machine, int p_depth, int &r_row) {
+Vector<GraphNode *> HSMEditorView::_populate_graph(const Ref<HSMStateSpec> &p_machine, int p_depth, int &r_row) {
 	Vector<GraphNode *> elements;
 	ERR_FAIL_COND_V(p_machine.is_null(), elements);
 
@@ -306,9 +306,9 @@ Vector<GraphNode *> HSMEditorView::_populate_graph(const Ref<HSMState> &p_machin
 		r_row += 1;
 	}
 
-	TypedArray<HSMState> children = p_machine->get_children();
+	TypedArray<HSMStateSpec> children = p_machine->get_children();
 	for (int i = 0; i < children.size(); i++) {
-		Ref<HSMState> spec = children[i];
+		Ref<HSMStateSpec> spec = children[i];
 		if (spec.is_null()) {
 			continue;
 		}
@@ -530,8 +530,8 @@ void HSMEditorView::_on_nest_resize_end(const Vector2 &p_size, const StringName 
 	if (nest.spec->get_graph_size() == size) {
 		return;
 	}
-	Ref<HSMState> before = _snapshot();
-	Ref<HSMState> authored = _authored_of(nest.spec, true);
+	Ref<HSMStateSpec> before = _snapshot();
+	Ref<HSMStateSpec> authored = _authored_of(nest.spec, true);
 	if (authored.is_null()) {
 		return;
 	}
@@ -575,7 +575,7 @@ void HSMEditorView::_on_nest_moved(const StringName &p_name) {
 	}
 }
 
-void HSMEditorView::_wire_graph(const Ref<HSMState> &p_machine) {
+void HSMEditorView::_wire_graph(const Ref<HSMStateSpec> &p_machine) {
 	ERR_FAIL_COND(p_machine.is_null());
 
 	TypedArray<HSMTransition> rows = p_machine->get_transitions();
@@ -605,21 +605,21 @@ void HSMEditorView::_wire_graph(const Ref<HSMState> &p_machine) {
 		graph->connect_node(from, 0, *to, 0);
 	}
 
-	TypedArray<HSMState> children = p_machine->get_children();
+	TypedArray<HSMStateSpec> children = p_machine->get_children();
 	for (int i = 0; i < children.size(); i++) {
-		Ref<HSMState> spec = children[i];
+		Ref<HSMStateSpec> spec = children[i];
 		if (spec.is_valid() && spec->is_machine()) {
 			_wire_graph(spec);
 		}
 	}
 }
 
-void HSMEditorView::_populate_list(const Ref<HSMState> &p_machine, TreeItem *p_parent) {
+void HSMEditorView::_populate_list(const Ref<HSMStateSpec> &p_machine, TreeItem *p_parent) {
 	ERR_FAIL_COND(p_machine.is_null());
 
-	TypedArray<HSMState> children = p_machine->get_children();
+	TypedArray<HSMStateSpec> children = p_machine->get_children();
 	for (int i = 0; i < children.size(); i++) {
-		Ref<HSMState> spec = children[i];
+		Ref<HSMStateSpec> spec = children[i];
 		if (spec.is_null()) {
 			continue;
 		}
@@ -698,7 +698,7 @@ void HSMEditorView::refresh() {
 	// Recomputed here rather than kept: a merged tree is a picture of two files at one
 	// moment, and both of them can change between refreshes.
 	merged_root = hsm->get_effective_root();
-	Ref<HSMState> root = merged_root;
+	Ref<HSMStateSpec> root = merged_root;
 	list_title->set_text(String(root->get_state_name()));
 
 	int row = 0;
@@ -720,15 +720,15 @@ void HSMEditorView::refresh() {
 
 // ── Undo ──────────────────────────────────────────────────────────────────────
 
-Ref<HSMState> HSMEditorView::_snapshot() const {
-	return hsm.is_valid() ? _clone_tree(hsm->get_root()) : Ref<HSMState>();
+Ref<HSMStateSpec> HSMEditorView::_snapshot() const {
+	return hsm.is_valid() ? _clone_tree(hsm->get_root()) : Ref<HSMStateSpec>();
 }
 
 // Called with the edit already made, so the action is committed without running its do side.
 // Running it would swap the live tree for a copy of itself, and every Ref the caller is still
 // holding -- the state it just added, the row it just wired -- would be pointing at the tree
 // that was thrown away.
-void HSMEditorView::_commit_edit(const String &p_name, const Ref<HSMState> &p_before) {
+void HSMEditorView::_commit_edit(const String &p_name, const Ref<HSMStateSpec> &p_before) {
 	if (hsm.is_null() || p_before.is_null()) {
 		return;
 	}
@@ -741,7 +741,7 @@ void HSMEditorView::_commit_edit(const String &p_name, const Ref<HSMState> &p_be
 	undo_redo->commit_action(false);
 }
 
-void HSMEditorView::_restore_root(const Ref<HierarchicalStateMachine> &p_target, const Ref<HSMState> &p_root) {
+void HSMEditorView::_restore_root(const Ref<HierarchicalStateMachine> &p_target, const Ref<HSMStateSpec> &p_root) {
 	if (p_target.is_null()) {
 		return;
 	}
@@ -763,7 +763,7 @@ void HSMEditorView::edit_hsm(const Ref<HierarchicalStateMachine> &p_hsm) {
 		// A file created from the FileSystem dock arrives empty. Giving it a root here
 		// rather than in the constructor keeps "an empty file" loadable and still leaves
 		// the editor with something to draw.
-		Ref<HSMState> root;
+		Ref<HSMStateSpec> root;
 		root.instantiate();
 		root->set_state_name("HSM");
 		hsm->set_root(root);
@@ -805,7 +805,7 @@ void HSMEditorView::_on_list_item_selected() {
 //
 // An inherited state goes nowhere: the Inspector would be editing a state that is thrown
 // away on the next refresh, and every keystroke would be silently lost.
-void HSMEditorView::_inspect(const Ref<HSMState> &p_drawn) {
+void HSMEditorView::_inspect(const Ref<HSMStateSpec> &p_drawn) {
 	if (p_drawn.is_null()) {
 		return;
 	}
@@ -813,7 +813,7 @@ void HSMEditorView::_inspect(const Ref<HSMState> &p_drawn) {
 		EditorInterface::get_singleton()->inspect_object(nullptr);
 		return;
 	}
-	Ref<HSMState> authored = _authored_of(p_drawn, false);
+	Ref<HSMStateSpec> authored = _authored_of(p_drawn, false);
 	if (authored.is_valid()) {
 		EditorInterface::get_singleton()->edit_resource(authored);
 	}
@@ -842,7 +842,7 @@ void HSMEditorView::_on_graph_node_selected(Node *p_node) {
 	_inspect(entry->spec);
 }
 
-void HSMEditorView::_drill_into(const Ref<HSMState> &p_state) {
+void HSMEditorView::_drill_into(const Ref<HSMStateSpec> &p_state) {
 	if (p_state.is_null()) {
 		return;
 	}
@@ -893,20 +893,20 @@ void HSMEditorView::_on_graph_node_gui_input(const Ref<InputEvent> &p_event, con
 
 // ── The node's own menu ───────────────────────────────────────────────────────
 
-Ref<HSMState> HSMEditorView::_machine_for_node(const StringName &p_name, Ref<HSMState> &r_state) const {
+Ref<HSMStateSpec> HSMEditorView::_machine_for_node(const StringName &p_name, Ref<HSMStateSpec> &r_state) const {
 	const DrawnState *entry = drawn.getptr(p_name);
 	if (entry != nullptr) {
 		r_state = entry->spec;
 		return entry->machine;
 	}
-	const Ref<HSMState> *machine = anystate_machines.getptr(p_name);
-	r_state = Ref<HSMState>();
-	return machine != nullptr ? *machine : Ref<HSMState>();
+	const Ref<HSMStateSpec> *machine = anystate_machines.getptr(p_name);
+	r_state = Ref<HSMStateSpec>();
+	return machine != nullptr ? *machine : Ref<HSMStateSpec>();
 }
 
 void HSMEditorView::_open_node_menu(const StringName &p_name) {
-	Ref<HSMState> state;
-	Ref<HSMState> machine = _machine_for_node(p_name, state);
+	Ref<HSMStateSpec> state;
+	Ref<HSMStateSpec> machine = _machine_for_node(p_name, state);
 	if (machine.is_null()) {
 		return;
 	}
@@ -957,8 +957,8 @@ void HSMEditorView::_open_node_menu(const StringName &p_name) {
 }
 
 void HSMEditorView::_on_node_menu_pressed(int p_id) {
-	Ref<HSMState> state;
-	Ref<HSMState> machine = _machine_for_node(menu_node, state);
+	Ref<HSMStateSpec> state;
+	Ref<HSMStateSpec> machine = _machine_for_node(menu_node, state);
 	if (machine.is_null()) {
 		return;
 	}
@@ -970,7 +970,7 @@ void HSMEditorView::_on_node_menu_pressed(int p_id) {
 			_add_child_state(state);
 		} break;
 		case MENU_REMOVE: {
-			Ref<HSMState> before = _snapshot();
+			Ref<HSMStateSpec> before = _snapshot();
 			if (_remove_drawn(state)) {
 				_commit_edit(TTR("Remove State"), before);
 				refresh();
@@ -984,8 +984,8 @@ void HSMEditorView::_on_node_menu_pressed(int p_id) {
 }
 
 void HSMEditorView::_on_transition_menu_pressed(int p_id) {
-	Ref<HSMState> state;
-	Ref<HSMState> machine = _machine_for_node(menu_node, state);
+	Ref<HSMStateSpec> state;
+	Ref<HSMStateSpec> machine = _machine_for_node(menu_node, state);
 	if (machine.is_null()) {
 		return;
 	}
@@ -994,7 +994,7 @@ void HSMEditorView::_on_transition_menu_pressed(int p_id) {
 		return;
 	}
 	Ref<HSMTransition> row = rows[p_id];
-	Ref<HSMState> before = _snapshot();
+	Ref<HSMStateSpec> before = _snapshot();
 	if (_remove_transition(machine, row)) {
 		_commit_edit(TTR("Remove Transition"), before);
 		refresh();
@@ -1004,7 +1004,7 @@ void HSMEditorView::_on_transition_menu_pressed(int p_id) {
 
 // ── The edge's own menu ───────────────────────────────────────────────────────
 
-Vector<int> HSMEditorView::_rows_between(const Ref<HSMState> &p_machine, const Ref<HSMState> &p_a, const Ref<HSMState> &p_b) const {
+Vector<int> HSMEditorView::_rows_between(const Ref<HSMStateSpec> &p_machine, const Ref<HSMStateSpec> &p_a, const Ref<HSMStateSpec> &p_b) const {
 	Vector<int> found;
 	if (p_machine.is_null()) {
 		return found;
@@ -1031,9 +1031,9 @@ Vector<int> HSMEditorView::_rows_between(const Ref<HSMState> &p_machine, const R
 // them there is no answer to "which one", and showing either would be showing the wrong one
 // half the time.
 void HSMEditorView::_on_connection_picked(const StringName &p_from, const StringName &p_to) {
-	Ref<HSMState> from_state;
-	Ref<HSMState> to_state;
-	Ref<HSMState> machine = _machine_for_node(p_from, from_state);
+	Ref<HSMStateSpec> from_state;
+	Ref<HSMStateSpec> to_state;
+	Ref<HSMStateSpec> machine = _machine_for_node(p_from, from_state);
 	if (machine.is_null() || machine != _machine_for_node(p_to, to_state)) {
 		return;
 	}
@@ -1053,9 +1053,9 @@ void HSMEditorView::_on_connection_picked(const StringName &p_from, const String
 }
 
 void HSMEditorView::_on_connection_menu_requested(const StringName &p_from, const StringName &p_to) {
-	Ref<HSMState> from_state;
-	Ref<HSMState> to_state;
-	Ref<HSMState> machine = _machine_for_node(p_from, from_state);
+	Ref<HSMStateSpec> from_state;
+	Ref<HSMStateSpec> to_state;
+	Ref<HSMStateSpec> machine = _machine_for_node(p_from, from_state);
 	if (machine.is_null() || machine != _machine_for_node(p_to, to_state)) {
 		return;
 	}
@@ -1092,7 +1092,7 @@ void HSMEditorView::_on_line_menu_pressed(int p_id) {
 	if (p_id < 0 || p_id >= rows.size()) {
 		return;
 	}
-	Ref<HSMState> before = _snapshot();
+	Ref<HSMStateSpec> before = _snapshot();
 	if (_remove_transition(line_machine, rows[p_id])) {
 		_commit_edit(TTR("Remove Transition"), before);
 		refresh();
@@ -1102,13 +1102,13 @@ void HSMEditorView::_on_line_menu_pressed(int p_id) {
 
 // Looked for in this file only. A row that is drawn but not here came from the base, and
 // nothing done to it here could stay in this file.
-Ref<HSMTransition> HSMEditorView::_authored_transition(const Ref<HSMState> &p_machine, const Ref<HSMTransition> &p_row) {
+Ref<HSMTransition> HSMEditorView::_authored_transition(const Ref<HSMStateSpec> &p_machine, const Ref<HSMTransition> &p_row) {
 	if (p_row.is_null() || p_row->get_to().is_null()) {
 		return nullptr;
 	}
-	Ref<HSMState> owner = _authored_of(p_machine, false);
-	Ref<HSMState> to_authored = _authored_of(p_row->get_to(), false);
-	Ref<HSMState> from_authored;
+	Ref<HSMStateSpec> owner = _authored_of(p_machine, false);
+	Ref<HSMStateSpec> to_authored = _authored_of(p_row->get_to(), false);
+	Ref<HSMStateSpec> from_authored;
 	if (p_row->get_from().is_valid()) {
 		from_authored = _authored_of(p_row->get_from(), false);
 		if (from_authored.is_null()) {
@@ -1135,9 +1135,9 @@ Ref<HSMTransition> HSMEditorView::_authored_transition(const Ref<HSMState> &p_ma
 }
 
 // Cutting a row that came from the base would cut it for every machine that inherits it.
-bool HSMEditorView::_remove_transition(const Ref<HSMState> &p_machine, const Ref<HSMTransition> &p_row) {
+bool HSMEditorView::_remove_transition(const Ref<HSMStateSpec> &p_machine, const Ref<HSMTransition> &p_row) {
 	Ref<HSMTransition> authored = _authored_transition(p_machine, p_row);
-	Ref<HSMState> owner = _authored_of(p_machine, false);
+	Ref<HSMStateSpec> owner = _authored_of(p_machine, false);
 	if (authored.is_null() || owner.is_null()) {
 		WARN_PRINT("LimboAI: This transition is inherited; remove it in the base machine.");
 		return false;
@@ -1159,8 +1159,8 @@ bool HSMEditorView::_remove_transition(const Ref<HSMState> &p_machine, const Ref
 // only siblings: a machine owns the transitions between its own children, and LimboHSM
 // refuses anything else at wiring time.
 void HSMEditorView::_begin_connect_from(const StringName &p_name) {
-	Ref<HSMState> state;
-	Ref<HSMState> machine = _machine_for_node(p_name, state);
+	Ref<HSMStateSpec> state;
+	Ref<HSMStateSpec> machine = _machine_for_node(p_name, state);
 	if (machine.is_null()) {
 		return;
 	}
@@ -1180,7 +1180,7 @@ void HSMEditorView::_on_graph_end_node_move() {
 	}
 	// Taken before a single position is written, and thrown away unread when nothing moved --
 	// `end_node_move` also arrives from a press that merely selected a node.
-	Ref<HSMState> before = _snapshot();
+	Ref<HSMStateSpec> before = _snapshot();
 	bool moved = false;
 	for (int i = 0; i < graph->get_child_count(); i++) {
 		GraphNode *node = Object::cast_to<GraphNode>(graph->get_child(i));
@@ -1205,7 +1205,7 @@ void HSMEditorView::_on_graph_end_node_move() {
 		// Where an inherited node sits is this file's own business, so laying one out is
 		// an edit like any other and gives it a stub. Compared against the drawn value
 		// first, or merely opening the tab would fill the file with stubs.
-		Ref<HSMState> authored = _authored_of(entry->spec, true);
+		Ref<HSMStateSpec> authored = _authored_of(entry->spec, true);
 		if (authored.is_null()) {
 			continue;
 		}
@@ -1222,7 +1222,7 @@ void HSMEditorView::_on_graph_end_node_move() {
 	}
 }
 
-Ref<HSMState> HSMEditorView::_selected_spec() const {
+Ref<HSMStateSpec> HSMEditorView::_selected_spec() const {
 	TreeItem *item = state_list->get_selected();
 	if (item == nullptr) {
 		return nullptr;
@@ -1236,10 +1236,10 @@ Ref<HSMState> HSMEditorView::_selected_spec() const {
 		return nullptr;
 	}
 	const DrawnState *entry = drawn.getptr(*name);
-	return entry != nullptr ? entry->spec : Ref<HSMState>();
+	return entry != nullptr ? entry->spec : Ref<HSMStateSpec>();
 }
 
-Ref<HSMState> HSMEditorView::_machine_of(const Ref<HSMState> &p_state) const {
+Ref<HSMStateSpec> HSMEditorView::_machine_of(const Ref<HSMStateSpec> &p_state) const {
 	if (p_state.is_null()) {
 		return nullptr;
 	}
@@ -1248,10 +1248,10 @@ Ref<HSMState> HSMEditorView::_machine_of(const Ref<HSMState> &p_state) const {
 		return nullptr;
 	}
 	const DrawnState *entry = drawn.getptr(*name);
-	return entry != nullptr ? entry->machine : Ref<HSMState>();
+	return entry != nullptr ? entry->machine : Ref<HSMStateSpec>();
 }
 
-Ref<HSMState> HSMEditorView::_authored_of(const Ref<HSMState> &p_drawn, bool p_create) {
+Ref<HSMStateSpec> HSMEditorView::_authored_of(const Ref<HSMStateSpec> &p_drawn, bool p_create) {
 	if (p_drawn.is_null() || hsm.is_null()) {
 		return nullptr;
 	}
@@ -1269,18 +1269,18 @@ Ref<HSMState> HSMEditorView::_authored_of(const Ref<HSMState> &p_drawn, bool p_c
 	// An edit that reaches an inherited state gives this file a state of its own that
 	// names it. That empty state is how a child file points at something it does not own:
 	// merging matches by name, so it lands back on the very state that is drawn here.
-	Ref<HSMState> parent_drawn = _machine_of(p_drawn);
+	Ref<HSMStateSpec> parent_drawn = _machine_of(p_drawn);
 	if (parent_drawn.is_null()) {
 		// The root always has an authored counterpart -- edit_hsm() sees to that.
 		return hsm->get_root();
 	}
-	Ref<HSMState> parent = _authored_of(parent_drawn, true);
+	Ref<HSMStateSpec> parent = _authored_of(parent_drawn, true);
 	ERR_FAIL_COND_V(parent.is_null(), nullptr);
 
-	Ref<HSMState> stub;
+	Ref<HSMStateSpec> stub;
 	stub.instantiate();
 	stub->set_state_name(p_drawn->get_state_name());
-	TypedArray<HSMState> children = parent->get_children();
+	TypedArray<HSMStateSpec> children = parent->get_children();
 	children.append(stub);
 	parent->set_children(children);
 
@@ -1290,14 +1290,14 @@ Ref<HSMState> HSMEditorView::_authored_of(const Ref<HSMState> &p_drawn, bool p_c
 	return stub;
 }
 
-StringName HSMEditorView::_unique_child_name(const Ref<HSMState> &p_machine) const {
+StringName HSMEditorView::_unique_child_name(const Ref<HSMStateSpec> &p_machine) const {
 	ERR_FAIL_COND_V(p_machine.is_null(), StringName("State"));
-	TypedArray<HSMState> children = p_machine->get_children();
+	TypedArray<HSMStateSpec> children = p_machine->get_children();
 	for (int n = 1; n < 1000; n++) {
 		String candidate = n == 1 ? String("State") : vformat("State%d", n);
 		bool taken = false;
 		for (int i = 0; i < children.size(); i++) {
-			Ref<HSMState> spec = children[i];
+			Ref<HSMStateSpec> spec = children[i];
 			if (spec.is_valid() && String(spec->get_state_name()) == candidate) {
 				taken = true;
 				break;
@@ -1310,12 +1310,12 @@ StringName HSMEditorView::_unique_child_name(const Ref<HSMState> &p_machine) con
 	return StringName("State");
 }
 
-void HSMEditorView::_detach_state(const Ref<HSMState> &p_machine, const Ref<HSMState> &p_state) {
+void HSMEditorView::_detach_state(const Ref<HSMStateSpec> &p_machine, const Ref<HSMStateSpec> &p_state) {
 	ERR_FAIL_COND(p_machine.is_null() || p_state.is_null());
 
-	TypedArray<HSMState> children = p_machine->get_children();
+	TypedArray<HSMStateSpec> children = p_machine->get_children();
 	for (int i = children.size() - 1; i >= 0; i--) {
-		Ref<HSMState> spec = children[i];
+		Ref<HSMStateSpec> spec = children[i];
 		if (spec == p_state) {
 			children.remove_at(i);
 		}
@@ -1341,34 +1341,34 @@ void HSMEditorView::_detach_state(const Ref<HSMState> &p_machine, const Ref<HSMS
 }
 
 void HSMEditorView::_on_add_pressed() {
-	Ref<HSMState> drawn_parent = _selected_spec();
+	Ref<HSMStateSpec> drawn_parent = _selected_spec();
 	if (drawn_parent.is_null()) {
 		drawn_parent = merged_root;
 	}
 	_add_child_state(drawn_parent);
 }
 
-void HSMEditorView::_add_child_state(const Ref<HSMState> &p_drawn_parent) {
+void HSMEditorView::_add_child_state(const Ref<HSMStateSpec> &p_drawn_parent) {
 	if (hsm.is_null()) {
 		return;
 	}
-	Ref<HSMState> drawn_parent = p_drawn_parent;
+	Ref<HSMStateSpec> drawn_parent = p_drawn_parent;
 	ERR_FAIL_COND(drawn_parent.is_null());
-	Ref<HSMState> before = _snapshot();
+	Ref<HSMStateSpec> before = _snapshot();
 	// Adding *to* an inherited machine is allowed -- adding is the only thing a child file
 	// can do, and it is where the stub for that machine comes from.
-	Ref<HSMState> parent = _authored_of(drawn_parent, true);
+	Ref<HSMStateSpec> parent = _authored_of(drawn_parent, true);
 	ERR_FAIL_COND(parent.is_null());
 
 	// A state becomes a machine by gaining a child. There is no separate button for it
 	// because there is no separate thing.
-	Ref<HSMState> spec;
+	Ref<HSMStateSpec> spec;
 	spec.instantiate();
 	// Named against what is drawn, not against what this file holds: a stub's children
 	// are only half of the machine, and the other half is where a clash would come from.
 	spec->set_state_name(_unique_child_name(drawn_parent));
 
-	TypedArray<HSMState> children = parent->get_children();
+	TypedArray<HSMStateSpec> children = parent->get_children();
 	children.append(spec);
 	parent->set_children(children);
 
@@ -1381,12 +1381,12 @@ void HSMEditorView::_on_delete_pressed() {
 	if (hsm.is_null()) {
 		return;
 	}
-	Ref<HSMState> spec = _selected_spec();
+	Ref<HSMStateSpec> spec = _selected_spec();
 	if (spec.is_null() || spec == merged_root) {
 		// The root is the machine itself; deleting it would leave the file with nothing.
 		return;
 	}
-	Ref<HSMState> before = _snapshot();
+	Ref<HSMStateSpec> before = _snapshot();
 	if (!_remove_drawn(spec)) {
 		return;
 	}
@@ -1399,7 +1399,7 @@ void HSMEditorView::_on_delete_pressed() {
 // Takes a drawn state out of the file that owns it, or refuses. Inherited states are not
 // removable here: what would change is the base file, and every machine that inherits it
 // would change with it -- on screen that reads as "I edited the boss".
-bool HSMEditorView::_remove_drawn(const Ref<HSMState> &p_drawn) {
+bool HSMEditorView::_remove_drawn(const Ref<HSMStateSpec> &p_drawn) {
 	if (p_drawn.is_null()) {
 		return false;
 	}
@@ -1407,8 +1407,8 @@ bool HSMEditorView::_remove_drawn(const Ref<HSMState> &p_drawn) {
 		WARN_PRINT(vformat("LimboAI: \"%s\" is inherited; remove it in the base machine.", p_drawn->get_state_name()));
 		return false;
 	}
-	Ref<HSMState> machine = _authored_of(_machine_of(p_drawn), true);
-	Ref<HSMState> spec = _authored_of(p_drawn, false);
+	Ref<HSMStateSpec> machine = _authored_of(_machine_of(p_drawn), true);
+	Ref<HSMStateSpec> spec = _authored_of(p_drawn, false);
 	if (machine.is_null() || spec.is_null()) {
 		return false;
 	}
@@ -1430,8 +1430,8 @@ void HSMEditorView::_on_connect_to_requested(const StringName &p_from, const Str
 		return;
 	}
 
-	Ref<HSMState> machine;
-	Ref<HSMState> from_spec;
+	Ref<HSMStateSpec> machine;
+	Ref<HSMStateSpec> from_spec;
 	const DrawnState *from_entry = drawn.getptr(p_from);
 	if (from_entry != nullptr) {
 		from_spec = from_entry->spec;
@@ -1450,16 +1450,16 @@ void HSMEditorView::_on_connect_to_requested(const StringName &p_from, const Str
 
 	// Before the stubs, not after: reaching for an inherited end gives this file a state of
 	// its own, and that is part of the edit an undo has to take back.
-	Ref<HSMState> before = _snapshot();
+	Ref<HSMStateSpec> before = _snapshot();
 
 	// The row goes in this file even when both ends are inherited -- that is what drawing
 	// an edge on a child machine means. Each end it reaches for gets a stub named after it.
-	Ref<HSMState> owner = _authored_of(machine, true);
-	Ref<HSMState> to_authored = _authored_of(to_entry->spec, true);
+	Ref<HSMStateSpec> owner = _authored_of(machine, true);
+	Ref<HSMStateSpec> to_authored = _authored_of(to_entry->spec, true);
 	if (owner.is_null() || to_authored.is_null()) {
 		return;
 	}
-	Ref<HSMState> from_authored;
+	Ref<HSMStateSpec> from_authored;
 	if (from_spec.is_valid()) {
 		from_authored = _authored_of(from_spec, true);
 		if (from_authored.is_null()) {
@@ -1487,7 +1487,7 @@ void HSMEditorView::_on_delete_nodes_request(const TypedArray<StringName> &p_nod
 	if (hsm.is_null()) {
 		return;
 	}
-	Ref<HSMState> before = _snapshot();
+	Ref<HSMStateSpec> before = _snapshot();
 	bool removed = false;
 	for (int i = 0; i < p_nodes.size(); i++) {
 		StringName name = p_nodes[i];

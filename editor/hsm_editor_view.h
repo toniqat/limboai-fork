@@ -61,8 +61,8 @@ private:
 	// One drawn node. `machine` is the state that owns the transitions between them,
 	// which is what makes a connection legal: both ends are always siblings.
 	struct DrawnState {
-		Ref<HSMState> spec;
-		Ref<HSMState> machine;
+		Ref<HSMStateSpec> spec;
+		Ref<HSMStateSpec> machine;
 		int depth = 0;
 	};
 
@@ -73,7 +73,7 @@ private:
 	struct Nest {
 		GraphNode *node = nullptr;
 		Control *content = nullptr;
-		Ref<HSMState> spec;
+		Ref<HSMStateSpec> spec;
 		Vector<GraphNode *> inner;
 		// Where the node stood when the fit last touched it, which is what turns the next
 		// move into a delta to hand down.
@@ -93,7 +93,7 @@ private:
 	Ref<HierarchicalStateMachine> hsm;
 	// What is drawn: the file's own states with whatever it inherits already merged in.
 	// Every edit is made on the authored state behind a drawn one, never on the drawn one.
-	Ref<HSMState> merged_root;
+	Ref<HSMStateSpec> merged_root;
 
 	// What a right-click on a node offers. `MENU_REMOVE_TRANSITION` is not here: the
 	// submenu carries one item per outgoing edge and its id is that edge's row index.
@@ -120,7 +120,7 @@ private:
 	// Which node the open menu is about. The menu outlives the click that opened it.
 	StringName menu_node;
 	// And which machine the open line menu's rows belong to, for the same reason.
-	Ref<HSMState> line_machine;
+	Ref<HSMStateSpec> line_machine;
 	// Handed to every undo action as its context, which is what puts them all in the global
 	// history. A resource has no history of its own, and the states being edited are
 	// sub-resources with no path at all -- the task editor carries the same dummy for it.
@@ -137,7 +137,7 @@ private:
 	HashMap<uint64_t, StringName> node_names;
 	// ANYSTATE node name -> the machine it belongs to. It is not a state, so it is in
 	// neither map above, and a right-click on it still has to find its machine.
-	HashMap<StringName, Ref<HSMState>> anystate_machines;
+	HashMap<StringName, Ref<HSMStateSpec>> anystate_machines;
 
 	// Deepest first, which is the order a fit has to take: a nest is measured against what
 	// stands in it, and one of those may be a nest itself.
@@ -150,12 +150,12 @@ private:
 	// and a fit moves the nest itself -- without this the second would read as the first.
 	bool adjusting = false;
 
-	static StringName _node_name_for(const Ref<HSMState> &p_state);
-	static StringName _anystate_node_name_for(const Ref<HSMState> &p_machine);
+	static StringName _node_name_for(const Ref<HSMStateSpec> &p_state);
+	static StringName _anystate_node_name_for(const Ref<HSMStateSpec> &p_machine);
 
 	void _hide_ports(GraphNode *p_node);
-	GraphNode *_make_node(const Ref<HSMState> &p_state, const Ref<HSMState> &p_machine, int p_depth, int p_row, bool p_nests, Control **r_content);
-	GraphNode *_make_anystate_node(const Ref<HSMState> &p_machine, int p_depth, int p_row);
+	GraphNode *_make_node(const Ref<HSMStateSpec> &p_state, const Ref<HSMStateSpec> &p_machine, int p_depth, int p_row, bool p_nests, Control **r_content);
+	GraphNode *_make_anystate_node(const Ref<HSMStateSpec> &p_machine, int p_depth, int p_row);
 	// Where a node stands. A nest's own size only reaches the node a layout pass later, so
 	// the figure the fit worked out is the one that answers until then.
 	Rect2 _drawn_rect(GraphNode *p_node) const;
@@ -178,9 +178,9 @@ private:
 	// Draws everything inside `p_machine` and hands back the nodes that stand for its
 	// direct contents. A nested machine is its own node here -- there is nothing else to
 	// hand back, since it is the thing the rest stand inside.
-	Vector<GraphNode *> _populate_graph(const Ref<HSMState> &p_machine, int p_depth, int &r_row);
-	void _wire_graph(const Ref<HSMState> &p_machine);
-	void _populate_list(const Ref<HSMState> &p_machine, TreeItem *p_parent);
+	Vector<GraphNode *> _populate_graph(const Ref<HSMStateSpec> &p_machine, int p_depth, int &r_row);
+	void _wire_graph(const Ref<HSMStateSpec> &p_machine);
+	void _populate_list(const Ref<HSMStateSpec> &p_machine, TreeItem *p_parent);
 
 	void _on_list_item_selected();
 	void _on_list_item_activated();
@@ -188,28 +188,28 @@ private:
 	void _on_graph_node_gui_input(const Ref<InputEvent> &p_event, const StringName &p_name);
 	void _on_graph_end_node_move();
 
-	void _drill_into(const Ref<HSMState> &p_state);
-	void _inspect(const Ref<HSMState> &p_drawn);
+	void _drill_into(const Ref<HSMStateSpec> &p_state);
+	void _inspect(const Ref<HSMStateSpec> &p_drawn);
 
-	Ref<HSMState> _selected_spec() const;
-	Ref<HSMState> _machine_of(const Ref<HSMState> &p_state) const;
+	Ref<HSMStateSpec> _selected_spec() const;
+	Ref<HSMStateSpec> _machine_of(const Ref<HSMStateSpec> &p_state) const;
 	// The machine a drawn node belongs to, whether it is a state or an ANYSTATE. Hands back
 	// a null state for the latter, which is also what a transition leaving it says.
-	Ref<HSMState> _machine_for_node(const StringName &p_name, Ref<HSMState> &r_state) const;
-	Ref<HSMState> _authored_of(const Ref<HSMState> &p_drawn, bool p_create);
-	StringName _unique_child_name(const Ref<HSMState> &p_machine) const;
-	void _detach_state(const Ref<HSMState> &p_machine, const Ref<HSMState> &p_state);
+	Ref<HSMStateSpec> _machine_for_node(const StringName &p_name, Ref<HSMStateSpec> &r_state) const;
+	Ref<HSMStateSpec> _authored_of(const Ref<HSMStateSpec> &p_drawn, bool p_create);
+	StringName _unique_child_name(const Ref<HSMStateSpec> &p_machine) const;
+	void _detach_state(const Ref<HSMStateSpec> &p_machine, const Ref<HSMStateSpec> &p_state);
 
-	bool _remove_drawn(const Ref<HSMState> &p_drawn);
-	void _add_child_state(const Ref<HSMState> &p_drawn_parent);
+	bool _remove_drawn(const Ref<HSMStateSpec> &p_drawn);
+	void _add_child_state(const Ref<HSMStateSpec> &p_drawn_parent);
 	// The row in *this* file that a drawn row stands for, or nothing when it came from the
 	// base. Matched on the event too: which of two rows between the same pair this is, is
 	// the one thing a pair of endpoints cannot say.
-	Ref<HSMTransition> _authored_transition(const Ref<HSMState> &p_machine, const Ref<HSMTransition> &p_row);
-	bool _remove_transition(const Ref<HSMState> &p_machine, const Ref<HSMTransition> &p_row);
+	Ref<HSMTransition> _authored_transition(const Ref<HSMStateSpec> &p_machine, const Ref<HSMTransition> &p_row);
+	bool _remove_transition(const Ref<HSMStateSpec> &p_machine, const Ref<HSMTransition> &p_row);
 	// Every drawn row running between two nodes, in either direction -- which is what one
 	// line on the graph stands for.
-	Vector<int> _rows_between(const Ref<HSMState> &p_machine, const Ref<HSMState> &p_a, const Ref<HSMState> &p_b) const;
+	Vector<int> _rows_between(const Ref<HSMStateSpec> &p_machine, const Ref<HSMStateSpec> &p_a, const Ref<HSMStateSpec> &p_b) const;
 
 	// ── Undo ──
 	// Snapshots rather than one entry per kind of edit. An edit here is not one call: adding
@@ -217,9 +217,9 @@ private:
 	// spelling that out per operation would mean writing the stub rule twice -- once to do it
 	// and once to take it back. A machine is a dozen small resources, so a copy of the whole
 	// authored tree is the cheaper thing to be exactly right about.
-	Ref<HSMState> _snapshot() const;
-	void _commit_edit(const String &p_name, const Ref<HSMState> &p_before);
-	void _restore_root(const Ref<HierarchicalStateMachine> &p_target, const Ref<HSMState> &p_root);
+	Ref<HSMStateSpec> _snapshot() const;
+	void _commit_edit(const String &p_name, const Ref<HSMStateSpec> &p_before);
+	void _restore_root(const Ref<HierarchicalStateMachine> &p_target, const Ref<HSMStateSpec> &p_root);
 
 	void _open_node_menu(const StringName &p_name);
 	void _on_node_menu_pressed(int p_id);
