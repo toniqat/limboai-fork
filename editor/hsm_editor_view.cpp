@@ -28,8 +28,12 @@
 
 #ifdef LIMBOAI_GDEXTENSION
 #include <godot_cpp/classes/control.hpp>
+#include <godot_cpp/classes/editor_undo_redo_manager.hpp>
+#include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/input_event_mouse_button.hpp>
 #include <godot_cpp/classes/tree_item.hpp>
+#include <godot_cpp/classes/undo_redo.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #endif // LIMBOAI_GDEXTENSION
 
@@ -44,10 +48,118 @@ const Color COLOR_ANYSTATE = Color(0.78, 0.62, 0.35);
 const int COLUMN_WIDTH = 300;
 const int ROW_HEIGHT = 120;
 
+// The room a machine's node leaves around the states standing in it -- and, since the box is
+// laid over them, the smallest it may be made. A grid square and a half at GraphEdit's own
+// snapping distance of 20: enough that a state's shadow and a bowed edge stay inside the
+// box, and little enough that the box still reads as drawn around them rather than as a
+// region they happen to be in.
+//
+// Where that node's border runs and how tall its title bar is are not here -- they are read
+// back off the node itself, so the theme decides them and this does not have to guess.
+const int NEST_PADDING = 30;
+
+// The strip inside a nest's other three edges that still answers to the mouse. Everything
+// further in is the room, and the room belongs to what stands in it: a press there has to
+// reach a state or an edge, not the box they are drawn inside.
+//
+// It is the resizer that sets the width, not the eye. GraphElement takes the resizer's own
+// icon as its hotzone and puts it in the bottom-right corner, so a band narrower than that
+// icon would leave part of the handle over the hole -- a corner that resizes along its outer
+// edge and does nothing along its inner one.
+const int NEST_GRAB_BAND = 16;
+
 // Inherited states are drawn, because a machine that showed only what its own file adds
 // would be a picture of a diff rather than of the machine. They are dimmed because the
 // file being edited is not where they can be changed.
 const float INHERITED_ALPHA = 0.55;
+
+// ── Copying an authored tree ──────────────────────────────────────────────────
+
+// One state and the copy standing for it, kept so that the references can be rebuilt once
+// every state on both sides exists -- the same two passes the merge in hsm_resource.cpp
+// takes, and for the same reason: a transition names states that may not be copied yet.
+struct ClonePair {
+	Ref<HSMState> src;
+	Ref<HSMState> copy;
+};
+
+Ref<HSMState> _mapped(const HashMap<uint64_t, Ref<HSMState>> &p_map, const Ref<HSMState> &p_state) {
+	if (p_state.is_null()) {
+		return nullptr;
+	}
+	const Ref<HSMState> *found = p_map.getptr(p_state->get_instance_id());
+	// A reference to something outside the tree is handed on as it stands. It is already
+	// broken, and a copy that quietly dropped it would make an undo lose more than it
+	// restores.
+	return found != nullptr ? *found : p_state;
+}
+
+Ref<HSMState> _clone_state(const Ref<HSMState> &p_src, HashMap<uint64_t, Ref<HSMState>> &r_map, Vector<ClonePair> &r_pairs) {
+	Ref<HSMState> copy;
+	copy.instantiate();
+	// Carried over, and this is the point of doing the copy by hand at all: the id is what
+	// names a sub-resource in the file, so a copy that took a fresh one would rename every
+	// state in the machine and put the whole file in the next diff.
+	copy->set_scene_unique_id(p_src->get_scene_unique_id());
+	copy->set_state_name(p_src->get_state_name());
+	copy->set_state_script(p_src->get_state_script());
+	copy->set_behavior_tree(p_src->get_behavior_tree());
+	copy->set_graph_position(p_src->get_graph_position());
+	copy->set_graph_size(p_src->get_graph_size());
+	r_map[p_src->get_instance_id()] = copy;
+	r_pairs.push_back(ClonePair{ p_src, copy });
+
+	TypedArray<HSMState> children = p_src->get_children();
+	TypedArray<HSMState> out;
+	for (int i = 0; i < children.size(); i++) {
+		Ref<HSMState> child = children[i];
+		if (child.is_null() || r_map.has(child->get_instance_id())) {
+			continue;
+		}
+		out.append(_clone_state(child, r_map, r_pairs));
+	}
+	copy->set_children(out);
+	return copy;
+}
+
+// A tree that shares nothing with the one it was made from.
+//
+// Not duplicate(true): a resource sitting in an Array comes back as the same object, so
+// `children` and `transitions` would point straight back at the states the copy is meant to
+// be safe from -- and the first edit after an undo would reach into the undo history.
+Ref<HSMState> _clone_tree(const Ref<HSMState> &p_root) {
+	if (p_root.is_null()) {
+		return nullptr;
+	}
+	HashMap<uint64_t, Ref<HSMState>> map;
+	Vector<ClonePair> pairs;
+	Ref<HSMState> root = _clone_state(p_root, map, pairs);
+
+	for (int i = 0; i < pairs.size(); i++) {
+		const ClonePair &pair = pairs[i];
+		TypedArray<HSMTransition> rows = pair.src->get_transitions();
+		TypedArray<HSMTransition> out;
+		for (int j = 0; j < rows.size(); j++) {
+			Ref<HSMTransition> row = rows[j];
+			if (row.is_null()) {
+				continue;
+			}
+			Ref<HSMTransition> copy;
+			copy.instantiate();
+			copy->set_scene_unique_id(row->get_scene_unique_id());
+			copy->set_from(_mapped(map, row->get_from()));
+			copy->set_to(_mapped(map, row->get_to()));
+			copy->set_event(row->get_event());
+			copy->set_note(row->get_note());
+			out.append(copy);
+		}
+		pair.copy->set_transitions(out);
+		// The declared value, not get_initial_child(): the fall back to the first child is
+		// an answer, and a copy that wrote it down would turn silence into a decision.
+		pair.copy->set_initial_child(_mapped(map, pair.src->get_declared_initial_child()));
+	}
+	return root;
+}
 
 } // namespace
 
@@ -61,16 +173,46 @@ StringName HSMEditorView::_anystate_node_name_for(const Ref<HSMState> &p_machine
 	return StringName("any_" + itos(p_machine->get_instance_id()));
 }
 
-GraphNode *HSMEditorView::_make_node(const Ref<HSMState> &p_state, const Ref<HSMState> &p_machine, int p_depth, int p_row) {
-	GraphNode *node = memnew(GraphNode);
+void HSMEditorView::_hide_ports(GraphNode *p_node) {
+	p_node->add_theme_icon_override("port", blank_port);
+}
+
+// A machine that holds states is drawn as a node with those states standing *inside* it,
+// which is what `p_nests` asks for. Depth alone does not say what is in what: one column
+// further right and unrelated look the same, so the states of `Combat` read as siblings of
+// the root's own.
+//
+// It is the node that grows rather than a frame put around it. A GraphFrame is a
+// GraphElement, not a GraphNode -- it has no slots and so no ports, and a transition can
+// only end at a port -- so a frame can never be the thing an edge arrives at, and a frame
+// *plus* the machine's own node draws the same machine twice, once as a title bar and once
+// as a box inside it. The node it already has is made big enough to be the box.
+//
+// What it says inside is then the states themselves. The word "machine (4)" was standing
+// in for a picture that could not be drawn; there is no reason to keep the caption once
+// the picture is there.
+GraphNode *HSMEditorView::_make_node(const Ref<HSMState> &p_state, const Ref<HSMState> &p_machine, int p_depth, int p_row, bool p_nests, Control **r_content) {
+	GraphNode *node = nullptr;
+	if (p_nests) {
+		// A box, and a box is a thing with a hole in it -- see HSMNestNode. It is also the
+		// only kind of node here that can be resized, because it is the only one whose size
+		// means anything: the others are as big as their title.
+		HSMNestNode *nest = memnew(HSMNestNode);
+		nest->set_resizable(true);
+		node = nest;
+	} else {
+		node = memnew(GraphNode);
+	}
 	node->set_name(_node_name_for(p_state));
 	node->set_title(String(p_state->get_state_name()));
 
 	Color color = COLOR_PLAIN;
-	String kind = TTR("state");
+	// Empty unless there is something the color cannot say. A plain state used to read
+	// "state" under its own name, which is the picture repeating itself.
+	String kind;
 	if (p_state->is_machine()) {
 		color = COLOR_MACHINE;
-		kind = vformat(TTR("machine (%d)"), p_state->get_children().size());
+		// Nothing written: being a machine *is* holding states, and they are drawn in here.
 	} else if (p_state->get_behavior_tree().is_valid()) {
 		color = COLOR_TREE;
 		// The file name rather than the word "tree": the color already says it is one,
@@ -80,20 +222,36 @@ GraphNode *HSMEditorView::_make_node(const Ref<HSMState> &p_state, const Ref<HSM
 		node->set_tooltip_text(TTR("Double-click to open this behavior tree."));
 	}
 
-	// A GraphNode needs at least one child control before slot 0 exists.
-	Label *label = memnew(Label);
-	label->set_text(kind);
-	node->add_child(label);
+	// A GraphNode needs at least one child control before slot 0 exists. When there is
+	// nothing to write, that child is an empty one rather than a label of filler -- and in
+	// a nest it is that same empty child, grown to the room the states need.
+	if (kind.is_empty()) {
+		Control *spacer = memnew(Control);
+		spacer->set_custom_minimum_size(Size2(0, 4) * EDSCALE);
+		// A Control stops the mouse by default, and this one is laid over the whole body of
+		// its node -- including, in a nest, the room every state inside it stands in. Nothing
+		// is drawn here and nothing is clicked here; the node behind it decides.
+		spacer->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+		node->add_child(spacer);
+		if (p_nests && r_content != nullptr) {
+			*r_content = spacer;
+		}
+	} else {
+		Label *label = memnew(Label);
+		label->set_text(kind);
+		node->add_child(label);
+	}
 	node->set_slot(0, true, 0, color, true, 0, color);
+	_hide_ports(node);
 
 	if (p_state->is_inherited()) {
 		node->set_self_modulate(Color(1, 1, 1, INHERITED_ALPHA));
 		node->set_tooltip_text(TTR("Inherited from the base machine. Change it there."));
 	}
 
-	// Drilling in is the node's own gesture, not the graph's: GraphEdit has no
-	// "node activated" of its own, and the `gui_input` signal is emitted before the
-	// node's own dragging handler sees the press.
+	// Drilling in and the context menu are the node's own gestures, not the graph's:
+	// GraphEdit has no "node activated" of its own, and the `gui_input` signal is emitted
+	// before the node's own dragging handler sees the press.
 	node->connect("gui_input", callable_mp(this, &HSMEditorView::_on_graph_node_gui_input).bind(node->get_name()));
 
 	Vector2 pos = p_state->get_graph_position();
@@ -109,18 +267,25 @@ GraphNode *HSMEditorView::_make_anystate_node(const Ref<HSMState> &p_machine, in
 	node->set_name(_anystate_node_name_for(p_machine));
 	node->set_title(String::utf8("✱ ANYSTATE"));
 
-	Label *label = memnew(Label);
-	label->set_text(TTR("no state is being left"));
-	node->add_child(label);
+	// It used to say "no state is being left" here. That is not what it *is*, it is what
+	// cannot be done to it, and where that belongs is the moment someone tries: aiming an
+	// edge at this node marks it refused before the click lands.
+	Control *spacer = memnew(Control);
+	spacer->set_custom_minimum_size(Size2(0, 4) * EDSCALE);
+	node->add_child(spacer);
 	// Only an outgoing port: ANYSTATE is never a destination.
 	node->set_slot(0, false, 0, COLOR_ANYSTATE, true, 0, COLOR_ANYSTATE);
+	_hide_ports(node);
+
+	node->connect("gui_input", callable_mp(this, &HSMEditorView::_on_graph_node_gui_input).bind(node->get_name()));
 
 	node->set_position_offset(Vector2(p_depth * COLUMN_WIDTH, p_row * ROW_HEIGHT));
 	return node;
 }
 
-void HSMEditorView::_populate_graph(const Ref<HSMState> &p_machine, int p_depth, int &r_row) {
-	ERR_FAIL_COND(p_machine.is_null());
+Vector<GraphNode *> HSMEditorView::_populate_graph(const Ref<HSMState> &p_machine, int p_depth, int &r_row) {
+	Vector<GraphNode *> elements;
+	ERR_FAIL_COND_V(p_machine.is_null(), elements);
 
 	// ANYSTATE only stands where a machine actually has such a row -- an empty one on
 	// every level would be noise on levels that never use it.
@@ -136,6 +301,8 @@ void HSMEditorView::_populate_graph(const Ref<HSMState> &p_machine, int p_depth,
 	if (has_anystate) {
 		GraphNode *any = _make_anystate_node(p_machine, p_depth, r_row);
 		graph->add_child(any);
+		anystate_machines[any->get_name()] = p_machine;
+		elements.push_back(any);
 		r_row += 1;
 	}
 
@@ -151,7 +318,16 @@ void HSMEditorView::_populate_graph(const Ref<HSMState> &p_machine, int p_depth,
 			continue;
 		}
 
-		GraphNode *node = _make_node(spec, p_machine, p_depth, r_row);
+		// A nest reaches above what it holds by a title bar and below it by a border, so the
+		// fallback layout leaves a row empty on either side. Without it that border lands on
+		// the sibling above or below and reads as taking it in.
+		bool holds = spec->is_machine();
+		if (holds && r_row > 0) {
+			r_row += 1;
+		}
+
+		Control *content = nullptr;
+		GraphNode *node = _make_node(spec, p_machine, p_depth, r_row, holds, &content);
 		graph->add_child(node);
 
 		DrawnState entry;
@@ -160,11 +336,242 @@ void HSMEditorView::_populate_graph(const Ref<HSMState> &p_machine, int p_depth,
 		entry.depth = p_depth;
 		drawn[node_name] = entry;
 		node_names[spec->get_instance_id()] = node_name;
-		r_row += 1;
-
-		if (spec->is_machine()) {
-			_populate_graph(spec, p_depth + 1, r_row);
+		// A nest takes no row of its own: the room it needs is the room its states take,
+		// and it is laid over them rather than above them.
+		if (!holds) {
+			r_row += 1;
 		}
+
+		if (holds) {
+			Vector<GraphNode *> inner = _populate_graph(spec, p_depth + 1, r_row);
+			if (inner.is_empty() || content == nullptr) {
+				// Nothing was drawn inside after all (the same resource twice), so there is
+				// nothing to be a nest around.
+				r_row += 1;
+			} else {
+				// A nest is a backdrop for what stands in it. Where in the child list that
+				// puts it is _enforce_nest_order()'s to say, and it is said again every time
+				// GraphEdit lifts something -- so it is not said here.
+				Nest nest;
+				nest.node = node;
+				nest.content = content;
+				nest.spec = spec;
+				nest.inner = inner;
+				nest_of[node_name] = nests.size();
+				nests.push_back(nest);
+				node->connect("position_offset_changed", callable_mp(this, &HSMEditorView::_on_nest_moved).bind(node_name));
+				node->connect("raise_request", callable_mp(this, &HSMEditorView::_on_nest_raised));
+				node->connect("resize_request", callable_mp(this, &HSMEditorView::_on_nest_resize_request).bind(node_name));
+				node->connect("resize_end", callable_mp(this, &HSMEditorView::_on_nest_resize_end).bind(node_name));
+				r_row += 1;
+			}
+		}
+		elements.push_back(node);
+	}
+	return elements;
+}
+
+// ── A machine's node, sized around what stands in it ──────────────────────────
+
+Rect2 HSMEditorView::_drawn_rect(GraphNode *p_node) const {
+	const int *index = nest_of.getptr(p_node->get_name());
+	if (index != nullptr && nests[*index].rect.size.x > 0.0) {
+		// A nest that has already been fitted this pass. Its node only takes that size a
+		// layout later, so asking the node would measure the picture before the change.
+		return nests[*index].rect;
+	}
+	Size2 size = p_node->get_size();
+	if (size.x < 1.0 || size.y < 1.0) {
+		size = p_node->get_combined_minimum_size();
+	}
+	return Rect2(p_node->get_position_offset(), size);
+}
+
+// Deepest first, so a nest inside a nest is already the size it will be when the one
+// around it measures what it holds.
+//
+// The insets are read off the node rather than worked out: where the empty child sits
+// inside its node *is* the title bar plus the panel's margins, and those come from the
+// theme. That reading needs a node that has been laid out once, which is why this is
+// deferred and why it waits for one when it arrives too early.
+void HSMEditorView::_fit_nests(int p_retry) {
+	if (nests.is_empty()) {
+		return;
+	}
+	for (int i = 0; i < nests.size(); i++) {
+		Nest &nest = nests.write[i];
+		if (nest.node == nullptr || nest.content == nullptr) {
+			continue;
+		}
+		Vector2 top_left = nest.content->get_position();
+		Size2 node_size = nest.node->get_size();
+		if (node_size.y < 1.0 || top_left.y < 1.0) {
+			if (p_retry < 4) {
+				callable_mp(this, &HSMEditorView::_fit_nests).bind(p_retry + 1).call_deferred();
+			}
+			return;
+		}
+		Vector2 bottom_right = node_size - top_left - nest.content->get_size();
+
+		Rect2 bounds;
+		bool first = true;
+		for (int j = 0; j < nest.inner.size(); j++) {
+			Rect2 rect = _drawn_rect(nest.inner[j]);
+			bounds = first ? rect : bounds.merge(rect);
+			first = false;
+		}
+		if (first) {
+			continue;
+		}
+
+		Vector2 padding = Vector2(NEST_PADDING, NEST_PADDING) * EDSCALE;
+		nest.inset_tl = top_left;
+		nest.inset_br = bottom_right;
+		nest.min_size = top_left + bounds.size + padding * 2.0 + bottom_right;
+
+		// Bigger than the floor only if someone asked for it. The file says nothing about the
+		// size of a box that was never resized, and it must keep saying nothing: the floor
+		// moves whenever a state inside does, and a size written down on every layout would
+		// pin the box to whatever the states happened to be doing that day.
+		Size2 wanted = nest.spec.is_valid() ? Size2(nest.spec->get_graph_size()) : Size2();
+		Size2 size = Size2(MAX(nest.min_size.x, wanted.x), MAX(nest.min_size.y, wanted.y));
+
+		nest.content->set_custom_minimum_size(size - top_left - bottom_right);
+
+		Vector2 offset = bounds.position - padding - top_left;
+		nest.rect = Rect2(offset, size);
+		// The view is moving it, not a drag: what it holds must not be handed the delta.
+		adjusting = true;
+		nest.node->set_position_offset(offset);
+		nest.node->set_size(size);
+		adjusting = false;
+		nest.last_offset = offset;
+		_update_nest_hole(nest);
+	}
+	// Deferred, unlike the one in refresh(): a fit also arrives from the end of a drag, and
+	// that is GraphEdit part-way through reading a press. Shuffling its children there is not
+	// something to find out about the hard way.
+	callable_mp(this, &HSMEditorView::_enforce_nest_order).call_deferred();
+}
+
+void HSMEditorView::_update_nest_hole(const Nest &p_nest) {
+	HSMNestNode *node = Object::cast_to<HSMNestNode>(p_nest.node);
+	if (node == nullptr) {
+		return;
+	}
+	float band = float(NEST_GRAB_BAND) * EDSCALE;
+	// Down from where the body starts, which is under the title bar, and in from the other
+	// three edges. Not `inset_tl.x` in from the sides: the panel's own margin is a couple of
+	// pixels, and a couple of pixels is not something a mouse can be aimed at.
+	Rect2 hole(band, p_nest.inset_tl.y, p_nest.rect.size.x - band * 2.0, p_nest.rect.size.y - p_nest.inset_tl.y - band);
+	if (hole.size.x <= 0.0 || hole.size.y <= 0.0) {
+		node->set_hole(Rect2());
+		return;
+	}
+	node->set_hole(hole);
+}
+
+// Outermost first, because each move puts one in front of the ones moved before it and
+// `nests` is deepest first. What lands above them all is everything that is not a nest --
+// the states themselves -- and GraphEdit's own `connections_layer`, so the lines stay on top
+// of the boxes and under nothing.
+void HSMEditorView::_enforce_nest_order() {
+	for (int i = 0; i < nests.size(); i++) {
+		GraphNode *node = nests[i].node;
+		if (node != nullptr && node->get_parent() == graph) {
+			graph->move_child(node, 0);
+		}
+	}
+}
+
+void HSMEditorView::_on_nest_raised() {
+	// Deferred: GraphEdit does its lifting from the same press, and this has to be what
+	// happens last rather than what happens first.
+	callable_mp(this, &HSMEditorView::_enforce_nest_order).call_deferred();
+}
+
+// While the resizer is being dragged. GraphElement asks rather than acts, so the clamp is
+// simply the answer given back -- there is no size the node passes through and is pulled out
+// of afterwards.
+void HSMEditorView::_on_nest_resize_request(const Vector2 &p_size, const StringName &p_name) {
+	const int *index = nest_of.getptr(p_name);
+	if (index == nullptr) {
+		return;
+	}
+	Nest &nest = nests.write[*index];
+	if (nest.node == nullptr || nest.content == nullptr) {
+		return;
+	}
+	Size2 size = Size2(MAX(p_size.x, nest.min_size.x), MAX(p_size.y, nest.min_size.y));
+	nest.content->set_custom_minimum_size(size - nest.inset_tl - nest.inset_br);
+	adjusting = true;
+	nest.node->set_size(size);
+	adjusting = false;
+	nest.rect.size = size;
+	_update_nest_hole(nest);
+}
+
+void HSMEditorView::_on_nest_resize_end(const Vector2 &p_size, const StringName &p_name) {
+	const int *index = nest_of.getptr(p_name);
+	if (index == nullptr || hsm.is_null()) {
+		return;
+	}
+	Nest &nest = nests.write[*index];
+	if (nest.spec.is_null()) {
+		return;
+	}
+	Size2 size = Size2(MAX(p_size.x, nest.min_size.x), MAX(p_size.y, nest.min_size.y)).round();
+	// Back at the floor is back to saying nothing. Writing the floor down instead would fix
+	// the box at today's contents, and the next state moved inside it would be cut off by a
+	// size that was never actually asked for.
+	if (size.x <= nest.min_size.x + 1.0 && size.y <= nest.min_size.y + 1.0) {
+		size = Size2();
+	}
+	if (nest.spec->get_graph_size() == size) {
+		return;
+	}
+	Ref<HSMState> before = _snapshot();
+	Ref<HSMState> authored = _authored_of(nest.spec, true);
+	if (authored.is_null()) {
+		return;
+	}
+	nest.spec->set_graph_size(size);
+	authored->set_graph_size(size);
+	_commit_edit(TTR("Resize State Machine"), before);
+	emit_signal("hsm_edited");
+}
+
+// Dragging a machine takes what is in it along -- it is drawn as one thing, so it moves as
+// one. Only the direct contents are pushed: a nest among them gets its own turn here and
+// pushes what *it* holds, so a state two levels down is moved once and not twice.
+//
+// Anything already selected is left alone. GraphEdit moves every selected element by the
+// same drag, so pushing it again would move it twice as far as the cursor.
+void HSMEditorView::_on_nest_moved(const StringName &p_name) {
+	if (adjusting) {
+		return;
+	}
+	const int *index = nest_of.getptr(p_name);
+	if (index == nullptr) {
+		return;
+	}
+	Nest &nest = nests.write[*index];
+	if (nest.node == nullptr) {
+		return;
+	}
+	Vector2 offset = nest.node->get_position_offset();
+	Vector2 delta = offset - nest.last_offset;
+	nest.last_offset = offset;
+	nest.rect.position = offset;
+	if (delta.is_zero_approx()) {
+		return;
+	}
+	for (int i = 0; i < nest.inner.size(); i++) {
+		GraphNode *node = nest.inner[i];
+		if (node == nullptr || node->is_selected()) {
+			continue;
+		}
+		node->set_position_offset(node->get_position_offset() + delta);
 	}
 }
 
@@ -252,15 +659,22 @@ void HSMEditorView::_populate_list(const Ref<HSMState> &p_machine, TreeItem *p_p
 void HSMEditorView::refresh() {
 	updating = true;
 
+	// The nodes it was aimed between are about to be deleted, and a half-made edge that
+	// survives a rebuild points at whatever inherits the name.
+	graph->cancel_connect();
+	// Before the connections go, not after: dropping the pick turns its highlight back off,
+	// and there is nothing left to turn off once the list has been emptied.
+	graph->clear_picked_connection();
 	graph->clear_connections();
-	// Only the nodes we put there. GraphEdit keeps a non-internal `connections_layer`
-	// child of its own, and removing it takes the lines with it -- after which every
-	// node move errors out.
+	// Only the elements we put there. GraphEdit keeps a non-internal `connections_layer`
+	// child of its own (and HSMGraphEdit a `pending_layer`), and removing either takes
+	// the lines with it -- after which every node move errors out. Neither is a
+	// GraphElement, which is what makes that cast the filter.
 	Vector<Node *> ours;
 	for (int i = 0; i < graph->get_child_count(); i++) {
-		GraphNode *node = Object::cast_to<GraphNode>(graph->get_child(i));
-		if (node != nullptr) {
-			ours.push_back(node);
+		GraphElement *element = Object::cast_to<GraphElement>(graph->get_child(i));
+		if (element != nullptr) {
+			ours.push_back(element);
 		}
 	}
 	for (int i = 0; i < ours.size(); i++) {
@@ -270,6 +684,9 @@ void HSMEditorView::refresh() {
 	state_list->clear();
 	drawn.clear();
 	node_names.clear();
+	anystate_machines.clear();
+	nests.clear();
+	nest_of.clear();
 	merged_root.unref();
 
 	if (hsm.is_null() || hsm->get_effective_root().is_null()) {
@@ -286,6 +703,7 @@ void HSMEditorView::refresh() {
 
 	int row = 0;
 	_populate_graph(root, 0, row);
+	_enforce_nest_order();
 	_wire_graph(root);
 
 	TreeItem *tree_root = state_list->create_item();
@@ -294,6 +712,49 @@ void HSMEditorView::refresh() {
 	_populate_list(root, tree_root);
 
 	updating = false;
+
+	// After the nodes exist and not before: a nest is measured against them, and a node
+	// that has never been laid out has no size to measure.
+	callable_mp(this, &HSMEditorView::_fit_nests).bind(0).call_deferred();
+}
+
+// ── Undo ──────────────────────────────────────────────────────────────────────
+
+Ref<HSMState> HSMEditorView::_snapshot() const {
+	return hsm.is_valid() ? _clone_tree(hsm->get_root()) : Ref<HSMState>();
+}
+
+// Called with the edit already made, so the action is committed without running its do side.
+// Running it would swap the live tree for a copy of itself, and every Ref the caller is still
+// holding -- the state it just added, the row it just wired -- would be pointing at the tree
+// that was thrown away.
+void HSMEditorView::_commit_edit(const String &p_name, const Ref<HSMState> &p_before) {
+	if (hsm.is_null() || p_before.is_null()) {
+		return;
+	}
+	EditorUndoRedoManager *undo_redo = EditorInterface::get_singleton()->get_editor_undo_redo();
+	ERR_FAIL_NULL(undo_redo);
+	undo_redo->create_action(p_name, UndoRedo::MERGE_DISABLE, history_context);
+	undo_redo->force_fixed_history();
+	undo_redo->add_do_method(this, "_restore_root", hsm, _snapshot());
+	undo_redo->add_undo_method(this, "_restore_root", hsm, p_before);
+	undo_redo->commit_action(false);
+}
+
+void HSMEditorView::_restore_root(const Ref<HierarchicalStateMachine> &p_target, const Ref<HSMState> &p_root) {
+	if (p_target.is_null()) {
+		return;
+	}
+	// A copy of the snapshot rather than the snapshot: it stays in the undo history, and the
+	// next edit would otherwise be made on the very tree an undo has to hand back.
+	p_target->set_root(_clone_tree(p_root));
+	if (p_target != hsm) {
+		// Another file's turn in the history came round while this view is showing something
+		// else. The file is still put right; there is just nothing here to redraw.
+		return;
+	}
+	refresh();
+	emit_signal("hsm_edited");
 }
 
 void HSMEditorView::edit_hsm(const Ref<HierarchicalStateMachine> &p_hsm) {
@@ -402,26 +863,324 @@ void HSMEditorView::_on_list_item_activated() {
 
 void HSMEditorView::_on_graph_node_gui_input(const Ref<InputEvent> &p_event, const StringName &p_name) {
 	Ref<InputEventMouseButton> mb = p_event;
-	if (mb.is_null() || !mb->is_pressed() || !mb->is_double_click() || mb->get_button_index() != LW_MBTN(LEFT)) {
+	if (mb.is_null() || !mb->is_pressed()) {
+		return;
+	}
+	// Swallowed either way, or the node would still be left mid-drag under a menu -- or
+	// under the tree's tab, which is about to cover this graph.
+	GraphNode *node = Object::cast_to<GraphNode>(graph->get_node_or_null(NodePath(String(p_name))));
+
+	if (mb->get_button_index() == LW_MBTN(RIGHT)) {
+		if (node != nullptr) {
+			node->accept_event();
+		}
+		_open_node_menu(p_name);
+		return;
+	}
+
+	if (!mb->is_double_click() || mb->get_button_index() != LW_MBTN(LEFT)) {
 		return;
 	}
 	const DrawnState *entry = drawn.getptr(p_name);
 	if (entry == nullptr || entry->spec->get_behavior_tree().is_null()) {
 		return;
 	}
-	// Swallowed, or the node would still be left mid-drag on a graph that is about to
-	// be hidden by the tree's tab.
-	GraphNode *node = Object::cast_to<GraphNode>(graph->get_node_or_null(NodePath(String(p_name))));
 	if (node != nullptr) {
 		node->accept_event();
 	}
 	_drill_into(entry->spec);
 }
 
+// ── The node's own menu ───────────────────────────────────────────────────────
+
+Ref<HSMState> HSMEditorView::_machine_for_node(const StringName &p_name, Ref<HSMState> &r_state) const {
+	const DrawnState *entry = drawn.getptr(p_name);
+	if (entry != nullptr) {
+		r_state = entry->spec;
+		return entry->machine;
+	}
+	const Ref<HSMState> *machine = anystate_machines.getptr(p_name);
+	r_state = Ref<HSMState>();
+	return machine != nullptr ? *machine : Ref<HSMState>();
+}
+
+void HSMEditorView::_open_node_menu(const StringName &p_name) {
+	Ref<HSMState> state;
+	Ref<HSMState> machine = _machine_for_node(p_name, state);
+	if (machine.is_null()) {
+		return;
+	}
+	menu_node = p_name;
+
+	node_menu->clear();
+	node_menu->add_item(TTR("Connect To..."), MENU_CONNECT);
+
+	// One item per edge leaving this node, and the id is where that edge sits in the
+	// machine's list. Cutting an edge used to mean dragging it off a port; with the ports
+	// gone this is the only way, and unlike a port it can name the event -- so a pair that
+	// carries two of them is no longer a line that refuses to be cut.
+	transition_menu->clear();
+	TypedArray<HSMTransition> rows = machine->get_transitions();
+	int outgoing = 0;
+	for (int i = 0; i < rows.size(); i++) {
+		Ref<HSMTransition> row = rows[i];
+		if (row.is_null() || row->get_to().is_null() || row->get_from() != state) {
+			continue;
+		}
+		String text = String::utf8("→ ") + String(row->get_to()->get_state_name());
+		if (!String(row->get_event()).is_empty()) {
+			text += vformat(" (%s)", row->get_event());
+		}
+		transition_menu->add_item(text, i);
+		outgoing += 1;
+	}
+	int trans_idx = node_menu->get_item_count();
+	node_menu->add_submenu_node_item(TTR("Remove Transition"), transition_menu);
+	node_menu->set_item_disabled(trans_idx, outgoing == 0);
+
+	node_menu->add_separator();
+	// ANYSTATE is not a state: it has no children to add to, nothing to delete, and no
+	// tree. The items stay so the menu keeps one shape, greyed rather than absent.
+	int add_idx = node_menu->get_item_count();
+	node_menu->add_item(TTR("Add Child State"), MENU_ADD_CHILD);
+	node_menu->set_item_disabled(add_idx, state.is_null());
+	int del_idx = node_menu->get_item_count();
+	node_menu->add_item(TTR("Remove State"), MENU_REMOVE);
+	node_menu->set_item_disabled(del_idx, state.is_null() || state->is_inherited());
+	int tree_idx = node_menu->get_item_count();
+	node_menu->add_item(TTR("Open Behavior Tree"), MENU_OPEN_TREE);
+	node_menu->set_item_disabled(tree_idx, state.is_null() || state->get_behavior_tree().is_null());
+
+	node_menu->set_position(get_screen_position() + get_local_mouse_position());
+	node_menu->reset_size();
+	node_menu->popup();
+}
+
+void HSMEditorView::_on_node_menu_pressed(int p_id) {
+	Ref<HSMState> state;
+	Ref<HSMState> machine = _machine_for_node(menu_node, state);
+	if (machine.is_null()) {
+		return;
+	}
+	switch (p_id) {
+		case MENU_CONNECT: {
+			_begin_connect_from(menu_node);
+		} break;
+		case MENU_ADD_CHILD: {
+			_add_child_state(state);
+		} break;
+		case MENU_REMOVE: {
+			Ref<HSMState> before = _snapshot();
+			if (_remove_drawn(state)) {
+				_commit_edit(TTR("Remove State"), before);
+				refresh();
+				emit_signal("hsm_edited");
+			}
+		} break;
+		case MENU_OPEN_TREE: {
+			_drill_into(state);
+		} break;
+	}
+}
+
+void HSMEditorView::_on_transition_menu_pressed(int p_id) {
+	Ref<HSMState> state;
+	Ref<HSMState> machine = _machine_for_node(menu_node, state);
+	if (machine.is_null()) {
+		return;
+	}
+	TypedArray<HSMTransition> rows = machine->get_transitions();
+	if (p_id < 0 || p_id >= rows.size()) {
+		return;
+	}
+	Ref<HSMTransition> row = rows[p_id];
+	Ref<HSMState> before = _snapshot();
+	if (_remove_transition(machine, row)) {
+		_commit_edit(TTR("Remove Transition"), before);
+		refresh();
+		emit_signal("hsm_edited");
+	}
+}
+
+// ── The edge's own menu ───────────────────────────────────────────────────────
+
+Vector<int> HSMEditorView::_rows_between(const Ref<HSMState> &p_machine, const Ref<HSMState> &p_a, const Ref<HSMState> &p_b) const {
+	Vector<int> found;
+	if (p_machine.is_null()) {
+		return found;
+	}
+	TypedArray<HSMTransition> rows = p_machine->get_transitions();
+	for (int i = 0; i < rows.size(); i++) {
+		Ref<HSMTransition> row = rows[i];
+		if (row.is_null() || row->get_to().is_null()) {
+			continue;
+		}
+		// Either way round: a pair that goes both ways is drawn as one line, so both of its
+		// rows are what was clicked. A null end is ANYSTATE, and comparing against a null
+		// `p_a` is how that is asked for -- there is no node to compare with.
+		bool forward = row->get_from() == p_a && row->get_to() == p_b;
+		bool backward = row->get_from() == p_b && row->get_to() == p_a;
+		if (forward || backward) {
+			found.push_back(i);
+		}
+	}
+	return found;
+}
+
+// One line, one Inspector -- but only when the line stands for exactly one row. With two of
+// them there is no answer to "which one", and showing either would be showing the wrong one
+// half the time.
+void HSMEditorView::_on_connection_picked(const StringName &p_from, const StringName &p_to) {
+	Ref<HSMState> from_state;
+	Ref<HSMState> to_state;
+	Ref<HSMState> machine = _machine_for_node(p_from, from_state);
+	if (machine.is_null() || machine != _machine_for_node(p_to, to_state)) {
+		return;
+	}
+	Vector<int> found = _rows_between(machine, from_state, to_state);
+	if (found.size() != 1) {
+		return;
+	}
+	TypedArray<HSMTransition> rows = machine->get_transitions();
+	Ref<HSMTransition> authored = _authored_transition(machine, rows[found[0]]);
+	if (authored.is_valid()) {
+		EditorInterface::get_singleton()->edit_resource(authored);
+	} else {
+		// Inherited: the row on screen is a copy the merge made, and editing that would be
+		// editing something the next refresh throws away.
+		EditorInterface::get_singleton()->inspect_object(nullptr);
+	}
+}
+
+void HSMEditorView::_on_connection_menu_requested(const StringName &p_from, const StringName &p_to) {
+	Ref<HSMState> from_state;
+	Ref<HSMState> to_state;
+	Ref<HSMState> machine = _machine_for_node(p_from, from_state);
+	if (machine.is_null() || machine != _machine_for_node(p_to, to_state)) {
+		return;
+	}
+	Vector<int> found = _rows_between(machine, from_state, to_state);
+	if (found.is_empty()) {
+		return;
+	}
+	line_machine = machine;
+
+	line_menu->clear();
+	TypedArray<HSMTransition> rows = machine->get_transitions();
+	for (int i = 0; i < found.size(); i++) {
+		Ref<HSMTransition> row = rows[found[i]];
+		String leaves = row->get_from().is_valid() ? String(row->get_from()->get_state_name()) : String::utf8("✱");
+		String text = vformat(String::utf8("%s  %s → %s"), TTR("Remove"), leaves, String(row->get_to()->get_state_name()));
+		if (!String(row->get_event()).is_empty()) {
+			// Which of the rows this one is. Between the same two states that is the only
+			// thing telling them apart, which is why the pair alone could not be the menu.
+			text += vformat(" (%s)", row->get_event());
+		}
+		line_menu->add_item(text, found[i]);
+	}
+
+	line_menu->set_position(get_screen_position() + get_local_mouse_position());
+	line_menu->reset_size();
+	line_menu->popup();
+}
+
+void HSMEditorView::_on_line_menu_pressed(int p_id) {
+	if (line_machine.is_null()) {
+		return;
+	}
+	TypedArray<HSMTransition> rows = line_machine->get_transitions();
+	if (p_id < 0 || p_id >= rows.size()) {
+		return;
+	}
+	Ref<HSMState> before = _snapshot();
+	if (_remove_transition(line_machine, rows[p_id])) {
+		_commit_edit(TTR("Remove Transition"), before);
+		refresh();
+		emit_signal("hsm_edited");
+	}
+}
+
+// Looked for in this file only. A row that is drawn but not here came from the base, and
+// nothing done to it here could stay in this file.
+Ref<HSMTransition> HSMEditorView::_authored_transition(const Ref<HSMState> &p_machine, const Ref<HSMTransition> &p_row) {
+	if (p_row.is_null() || p_row->get_to().is_null()) {
+		return nullptr;
+	}
+	Ref<HSMState> owner = _authored_of(p_machine, false);
+	Ref<HSMState> to_authored = _authored_of(p_row->get_to(), false);
+	Ref<HSMState> from_authored;
+	if (p_row->get_from().is_valid()) {
+		from_authored = _authored_of(p_row->get_from(), false);
+		if (from_authored.is_null()) {
+			return nullptr;
+		}
+	}
+	if (owner.is_null() || to_authored.is_null()) {
+		return nullptr;
+	}
+
+	// Matched on the event too, not just the pair: which of two edges between the same
+	// states this is, is the one thing a pair of endpoints never says.
+	TypedArray<HSMTransition> rows = owner->get_transitions();
+	for (int i = 0; i < rows.size(); i++) {
+		Ref<HSMTransition> row = rows[i];
+		if (row.is_null()) {
+			continue;
+		}
+		if (row->get_to() == to_authored && row->get_from() == from_authored && row->get_event() == p_row->get_event()) {
+			return row;
+		}
+	}
+	return nullptr;
+}
+
+// Cutting a row that came from the base would cut it for every machine that inherits it.
+bool HSMEditorView::_remove_transition(const Ref<HSMState> &p_machine, const Ref<HSMTransition> &p_row) {
+	Ref<HSMTransition> authored = _authored_transition(p_machine, p_row);
+	Ref<HSMState> owner = _authored_of(p_machine, false);
+	if (authored.is_null() || owner.is_null()) {
+		WARN_PRINT("LimboAI: This transition is inherited; remove it in the base machine.");
+		return false;
+	}
+	TypedArray<HSMTransition> rows = owner->get_transitions();
+	for (int i = 0; i < rows.size(); i++) {
+		if (Ref<HSMTransition>(rows[i]) == authored) {
+			rows.remove_at(i);
+			owner->set_transitions(rows);
+			return true;
+		}
+	}
+	return false;
+}
+
+// The gesture the ports used to carry, moved onto the nodes: the line follows the cursor
+// and lands on a whole node rather than on a dot. Which nodes it may land on is worked out
+// here and handed over -- the graph draws the answer, it does not know it. Siblings, and
+// only siblings: a machine owns the transitions between its own children, and LimboHSM
+// refuses anything else at wiring time.
+void HSMEditorView::_begin_connect_from(const StringName &p_name) {
+	Ref<HSMState> state;
+	Ref<HSMState> machine = _machine_for_node(p_name, state);
+	if (machine.is_null()) {
+		return;
+	}
+	Vector<StringName> targets;
+	for (const KeyValue<StringName, DrawnState> &entry : drawn) {
+		if (entry.value.machine != machine || entry.key == p_name) {
+			continue;
+		}
+		targets.push_back(entry.key);
+	}
+	graph->begin_connect_from(p_name, targets);
+}
+
 void HSMEditorView::_on_graph_end_node_move() {
 	if (updating || hsm.is_null()) {
 		return;
 	}
+	// Taken before a single position is written, and thrown away unread when nothing moved --
+	// `end_node_move` also arrives from a press that merely selected a node.
+	Ref<HSMState> before = _snapshot();
 	bool moved = false;
 	for (int i = 0; i < graph->get_child_count(); i++) {
 		GraphNode *node = Object::cast_to<GraphNode>(graph->get_child(i));
@@ -430,6 +1189,11 @@ void HSMEditorView::_on_graph_end_node_move() {
 		}
 		DrawnState *entry = drawn.getptr(node->get_name());
 		if (entry == nullptr) {
+			continue;
+		}
+		if (nest_of.has(node->get_name())) {
+			// Where a nest stands is worked out from what it holds, so it has no position
+			// of its own to save. Dragging one moved those, and they are saved right here.
 			continue;
 		}
 		// Snapped to whole pixels: writing floats straight through puts a diff in the
@@ -449,7 +1213,11 @@ void HSMEditorView::_on_graph_end_node_move() {
 		authored->set_graph_position(pos);
 		moved = true;
 	}
+	// Whatever moved, a nest around it is now the wrong size or in the wrong place -- and
+	// that holds for a state dragged out of one as much as for one dragged in.
+	_fit_nests();
 	if (moved) {
+		_commit_edit(TTR("Move States"), before);
 		emit_signal("hsm_edited");
 	}
 }
@@ -573,14 +1341,20 @@ void HSMEditorView::_detach_state(const Ref<HSMState> &p_machine, const Ref<HSMS
 }
 
 void HSMEditorView::_on_add_pressed() {
-	if (hsm.is_null()) {
-		return;
-	}
 	Ref<HSMState> drawn_parent = _selected_spec();
 	if (drawn_parent.is_null()) {
 		drawn_parent = merged_root;
 	}
+	_add_child_state(drawn_parent);
+}
+
+void HSMEditorView::_add_child_state(const Ref<HSMState> &p_drawn_parent) {
+	if (hsm.is_null()) {
+		return;
+	}
+	Ref<HSMState> drawn_parent = p_drawn_parent;
 	ERR_FAIL_COND(drawn_parent.is_null());
+	Ref<HSMState> before = _snapshot();
 	// Adding *to* an inherited machine is allowed -- adding is the only thing a child file
 	// can do, and it is where the stub for that machine comes from.
 	Ref<HSMState> parent = _authored_of(drawn_parent, true);
@@ -598,6 +1372,7 @@ void HSMEditorView::_on_add_pressed() {
 	children.append(spec);
 	parent->set_children(children);
 
+	_commit_edit(TTR("Add State"), before);
 	refresh();
 	emit_signal("hsm_edited");
 }
@@ -611,10 +1386,12 @@ void HSMEditorView::_on_delete_pressed() {
 		// The root is the machine itself; deleting it would leave the file with nothing.
 		return;
 	}
+	Ref<HSMState> before = _snapshot();
 	if (!_remove_drawn(spec)) {
 		return;
 	}
 
+	_commit_edit(TTR("Remove State"), before);
 	refresh();
 	emit_signal("hsm_edited");
 }
@@ -639,7 +1416,11 @@ bool HSMEditorView::_remove_drawn(const Ref<HSMState> &p_drawn) {
 	return true;
 }
 
-void HSMEditorView::_on_connection_request(const StringName &p_from, int p_from_port, const StringName &p_to, int p_to_port) {
+// One row in one machine, whatever gesture asked for it. GraphEdit's own
+// `connection_request` cannot reach here any more -- it only fires when a port drag lands,
+// and there are no ports to drag -- so the ports it used to carry are gone from the
+// signature too.
+void HSMEditorView::_on_connect_to_requested(const StringName &p_from, const StringName &p_to) {
 	if (hsm.is_null()) {
 		return;
 	}
@@ -667,6 +1448,10 @@ void HSMEditorView::_on_connection_request(const StringName &p_from, int p_from_
 		return;
 	}
 
+	// Before the stubs, not after: reaching for an inherited end gives this file a state of
+	// its own, and that is part of the edit an undo has to take back.
+	Ref<HSMState> before = _snapshot();
+
 	// The row goes in this file even when both ends are inherited -- that is what drawing
 	// an edge on a child machine means. Each end it reaches for gets a stub named after it.
 	Ref<HSMState> owner = _authored_of(machine, true);
@@ -693,54 +1478,7 @@ void HSMEditorView::_on_connection_request(const StringName &p_from, int p_from_
 	rows.append(row);
 	owner->set_transitions(rows);
 
-	refresh();
-	emit_signal("hsm_edited");
-}
-
-void HSMEditorView::_on_disconnection_request(const StringName &p_from, int p_from_port, const StringName &p_to, int p_to_port) {
-	if (hsm.is_null()) {
-		return;
-	}
-	const DrawnState *to_entry = drawn.getptr(p_to);
-	if (to_entry == nullptr) {
-		return;
-	}
-	const DrawnState *from_entry = drawn.getptr(p_from);
-	Ref<HSMState> from_spec = from_entry != nullptr ? from_entry->spec : Ref<HSMState>();
-
-	// Looked for in this file only. A row that is drawn but not here came from the base,
-	// and cutting it here would cut it for every machine that inherits that base.
-	Ref<HSMState> machine = _authored_of(to_entry->machine, false);
-	Ref<HSMState> to_authored = _authored_of(to_entry->spec, false);
-	Ref<HSMState> from_authored = from_spec.is_valid() ? _authored_of(from_spec, false) : Ref<HSMState>();
-	if (machine.is_null() || to_authored.is_null() || (from_spec.is_valid() && from_authored.is_null())) {
-		WARN_PRINT("LimboAI: This transition is inherited; remove it in the base machine.");
-		return;
-	}
-
-	TypedArray<HSMTransition> rows = machine->get_transitions();
-	int found = -1;
-	int matches = 0;
-	for (int i = 0; i < rows.size(); i++) {
-		Ref<HSMTransition> row = rows[i];
-		if (row.is_valid() && row->get_to() == to_authored && row->get_from() == from_authored) {
-			matches += 1;
-			found = i;
-		}
-	}
-	if (matches > 1) {
-		// One line, two events: removing "the" edge would silently drop an event that
-		// was never on screen. The inspector's transition list removes them one by one.
-		WARN_PRINT("LimboAI: This connection stands for more than one transition; remove them in the Inspector.");
-		return;
-	}
-	if (found < 0) {
-		WARN_PRINT("LimboAI: This transition is inherited; remove it in the base machine.");
-		return;
-	}
-	rows.remove_at(found);
-	machine->set_transitions(rows);
-
+	_commit_edit(TTR("Add Transition"), before);
 	refresh();
 	emit_signal("hsm_edited");
 }
@@ -749,6 +1487,7 @@ void HSMEditorView::_on_delete_nodes_request(const TypedArray<StringName> &p_nod
 	if (hsm.is_null()) {
 		return;
 	}
+	Ref<HSMState> before = _snapshot();
 	bool removed = false;
 	for (int i = 0; i < p_nodes.size(); i++) {
 		StringName name = p_nodes[i];
@@ -759,6 +1498,9 @@ void HSMEditorView::_on_delete_nodes_request(const TypedArray<StringName> &p_nod
 		removed = _remove_drawn(entry->spec) || removed;
 	}
 	if (removed) {
+		// One action for the lot. Undoing a delete of four states as four presses would be
+		// undoing something nobody did.
+		_commit_edit(TTR("Remove States"), before);
 		refresh();
 		emit_signal("hsm_edited");
 	}
@@ -771,9 +1513,13 @@ void HSMEditorView::_notification(int p_what) {
 			state_list->connect("item_activated", callable_mp(this, &HSMEditorView::_on_list_item_activated));
 			graph->connect("node_selected", callable_mp(this, &HSMEditorView::_on_graph_node_selected));
 			graph->connect("end_node_move", callable_mp(this, &HSMEditorView::_on_graph_end_node_move));
-			graph->connect("connection_request", callable_mp(this, &HSMEditorView::_on_connection_request));
-			graph->connect("disconnection_request", callable_mp(this, &HSMEditorView::_on_disconnection_request));
+			graph->connect("connect_to_requested", callable_mp(this, &HSMEditorView::_on_connect_to_requested));
 			graph->connect("delete_nodes_request", callable_mp(this, &HSMEditorView::_on_delete_nodes_request));
+			graph->connect("connection_picked", callable_mp(this, &HSMEditorView::_on_connection_picked));
+			graph->connect("connection_menu_requested", callable_mp(this, &HSMEditorView::_on_connection_menu_requested));
+			node_menu->connect("id_pressed", callable_mp(this, &HSMEditorView::_on_node_menu_pressed));
+			transition_menu->connect("id_pressed", callable_mp(this, &HSMEditorView::_on_transition_menu_pressed));
+			line_menu->connect("id_pressed", callable_mp(this, &HSMEditorView::_on_line_menu_pressed));
 			add_btn->connect("pressed", callable_mp(this, &HSMEditorView::_on_add_pressed));
 			del_btn->connect("pressed", callable_mp(this, &HSMEditorView::_on_delete_pressed));
 		} break;
@@ -781,6 +1527,10 @@ void HSMEditorView::_notification(int p_what) {
 }
 
 void HSMEditorView::_bind_methods() {
+	// Bound because the undo history calls it by name -- it is the one method here that is
+	// invoked from outside this class.
+	ClassDB::bind_method(D_METHOD("_restore_root", "target", "root"), &HSMEditorView::_restore_root);
+
 	ADD_SIGNAL(MethodInfo("hsm_edited"));
 }
 
@@ -815,12 +1565,37 @@ HSMEditorView::HSMEditorView() {
 	state_list->set_columns(1);
 	list_box->add_child(state_list);
 
-	graph = memnew(GraphEdit);
+	graph = memnew(HSMGraphEdit);
 	graph->set_h_size_flags(SIZE_EXPAND_FILL);
 	graph->set_v_size_flags(SIZE_EXPAND_FILL);
-	graph->set_right_disconnects(true);
 	graph->set_show_arrange_button(false);
 	add_child(graph);
+
+	// One texture for the whole view rather than one per node: it is the same blank, and a
+	// refresh makes a dozen nodes.
+	Ref<Image> blank = Image::create_empty(1, 1, false, Image::FORMAT_RGBA8);
+	blank->fill(Color(0, 0, 0, 0));
+	blank_port = ImageTexture::create_from_image(blank);
+
+	node_menu = memnew(PopupMenu);
+	add_child(node_menu);
+	transition_menu = memnew(PopupMenu);
+	transition_menu->set_name("TransitionMenu");
+	node_menu->add_child(transition_menu);
+
+	line_menu = memnew(PopupMenu);
+	line_menu->set_name("LineMenu");
+	add_child(line_menu);
+
+	// ! HACK: the same one the task editor carries. An action's history is worked out from
+	// the objects in it, and the objects here are sub-resources with no path -- a context of
+	// our own plus force_fixed_history() puts every one of them in the global history, which
+	// is the one Ctrl+Z reaches from a main screen.
+	history_context = memnew(Object);
+}
+
+HSMEditorView::~HSMEditorView() {
+	memdelete(history_context);
 }
 
 #endif // ! TOOLS_ENABLED

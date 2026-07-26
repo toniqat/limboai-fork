@@ -80,6 +80,10 @@ private:
 	Ref<HSMState> initial_child;
 	TypedArray<HSMTransition> transitions;
 	Vector2 graph_position;
+	// Only a machine's node has one, and only when it was resized by hand: its size is
+	// otherwise worked out from the states standing in it. Zero means "whatever fits",
+	// which is why it is not a size the editor writes on every layout.
+	Vector2 graph_size;
 
 	// Transient, and only ever set on the tree HierarchicalStateMachine::get_effective_root()
 	// builds -- neither is a property, so neither is written to a file. `origin` is the
@@ -113,6 +117,9 @@ public:
 
 	void set_graph_position(const Vector2 &p_position);
 	Vector2 get_graph_position() const { return graph_position; }
+
+	void set_graph_size(const Vector2 &p_size);
+	Vector2 get_graph_size() const { return graph_size; }
 
 	// The declared value, without get_initial_child()'s fall back to the first child.
 	// Merging needs to tell "this file says nothing" from "this file says the first one".

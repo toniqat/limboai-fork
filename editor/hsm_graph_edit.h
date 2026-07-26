@@ -1,0 +1,146 @@
+/**
+ * hsm_graph_edit.h
+ * =============================================================================
+ * Copyright (c) 2023-present Serhii Snitsaruk and the LimboAI contributors.
+ *
+ * Use of this source code is governed by an MIT-style
+ * license that can be found in the LICENSE file or at
+ * https://opensource.org/licenses/MIT.
+ * =============================================================================
+ */
+
+#ifdef TOOLS_ENABLED
+
+#ifndef HSM_GRAPH_EDIT_H
+#define HSM_GRAPH_EDIT_H
+
+#ifdef LIMBOAI_MODULE
+#include "core/input/input_event.h"
+#include "core/templates/vector.h"
+#include "scene/gui/control.h"
+#include "scene/gui/graph_edit.h"
+#include "scene/gui/graph_node.h"
+#endif // LIMBOAI_MODULE
+
+#ifdef LIMBOAI_GDEXTENSION
+#include <godot_cpp/classes/control.hpp>
+#include <godot_cpp/classes/graph_edit.hpp>
+#include <godot_cpp/classes/graph_node.hpp>
+#include <godot_cpp/classes/input_event.hpp>
+#include <godot_cpp/templates/vector.hpp>
+using namespace godot;
+#endif // LIMBOAI_GDEXTENSION
+
+// A GraphEdit that draws a state machine rather than a signal flow.
+//
+// GraphEdit's default line runs right port -> left port, which reads well only when the
+// graph flows one way. A state machine does not: nearly every pair of states goes both
+// ways, so half the edges leave on the right and have to crawl back around the node to
+// arrive on the left. With a dozen states those crawls overlap each other and the picture
+// stops answering "which state becomes which".
+//
+// Three things change here.
+//
+//  * An edge leaves and arrives at the node's *border* -- the point where the line joining
+//    the two centers crosses each rect. Direction is therefore position, and an edge that
+//    goes back takes the same road as the one that came.
+//  * It ends in an arrowhead. Without ports there is nothing else left to say which end is
+//    the destination. The virtual hands back points and nothing else, so the head is the
+//    polyline doubling back once: wing, tip, wing.
+//  * A pair that goes both ways becomes one line with a head at each end. How many lines
+//    are on screen is how readable the graph is, and half of them here are a second
+//    direction. The two *connections* stay and are made to agree on the exact same line
+//    instead, drawing on top of each other. Agreeing means neither end may decide anything
+//    of its own, so the pair is put in name order first.
+//
+// And a line that would cross a node it does not belong to is bowed aside until it does
+// not. Siblings stack in a column here, so a straight edge between two of them runs over
+// everyone in between.
+//
+// The ports themselves are dead. Their dots are hidden by the view and their hotzones are
+// refused here, so dragging near an edge always moves the node -- there is no invisible
+// spot that answers to the mouse. Making an edge is a gesture between *nodes* instead:
+// begin_connect_from() puts the graph in a mode where the line follows the cursor, whatever
+// node it lands on is the destination, and hovering says up front whether that node can be
+// one. That is also why the destination no longer has to be a port: a port could only be
+// aimed at once it was visible, and it is not.
+class HSMGraphEdit : public GraphEdit {
+	GDCLASS(HSMGraphEdit, GraphEdit);
+
+private:
+	// Drawn on top of the nodes, so the line being dragged is not buried under them. A
+	// plain Control rather than a class of its own -- it holds nothing, and the view only
+	// ever deletes GraphNode children, so it survives a rebuild.
+	Control *pending_layer = nullptr;
+	bool connecting = false;
+	StringName connect_from;
+	Vector<StringName> connect_targets;
+	StringName hovered;
+
+	// The picked edge, as the pair of nodes it runs between. Not a row: one line can stand
+	// for several transitions -- both directions of a pair are drawn on top of each other,
+	// and two states may be joined by more than one event -- so which row was meant is a
+	// question only the view can answer, and it is asked once the click has been placed.
+	StringName picked_from;
+	StringName picked_to;
+	bool _pick_connection_at(const Vector2 &p_position);
+	void _clear_pick();
+	void _mark_pick(float p_activity);
+
+	// Nothing is cached. A route is chosen against where every *other* node stands, so a
+	// cache would have to be dropped whenever any node moves -- and a redraw that lands
+	// mid-drag would still hand back the stale one. Re-walking a dozen rects per edge is
+	// cheaper than being wrong about which of the two it is.
+	GraphNode *_node_at(const Vector2 &p_position, bool p_input) const;
+	static Vector2 _edge_point(const Rect2 &p_rect, const Vector2 &p_dir);
+	static bool _segment_hits(const Vector2 &p_a, const Vector2 &p_b, const Rect2 &p_rect);
+	static Rect2 _rect_of(GraphNode *p_node);
+	static int _hits(const Rect2 &p_from, const Rect2 &p_to, const Vector2 &p_ctrl, const Vector<Rect2> &p_blockers);
+	static void _add_head(PackedVector2Array &r_points, const Vector2 &p_tip, const Vector2 &p_out, float p_scale = 1.0);
+	PackedVector2Array _route(GraphNode *p_from, GraphNode *p_to) const;
+
+	float _zoom() const;
+	// Where a node actually sits on screen. Its own rect is unscaled -- GraphEdit zooms a
+	// node by scaling it -- so the size has to be multiplied to match the position.
+	Rect2 _screen_rect_of(GraphNode *p_node) const;
+	GraphNode *_node_under(const Vector2 &p_local) const;
+	bool _is_target(const StringName &p_name) const;
+	void _update_hover();
+	void _draw_pending();
+	void _stop_connecting();
+
+protected:
+	static void _bind_methods();
+
+public:
+#ifdef LIMBOAI_GDEXTENSION
+	virtual PackedVector2Array _get_connection_line(const Vector2 &p_from_position, const Vector2 &p_to_position) const override;
+	// Refused, both of them. The dots are hidden, and a hotzone that is not drawn is a
+	// place the mouse behaves differently for no reason the screen can give.
+	virtual bool _is_in_input_hotzone(Object *, int32_t, const Vector2 &) override { return false; }
+	virtual bool _is_in_output_hotzone(Object *, int32_t, const Vector2 &) override { return false; }
+	// Not _gui_input: while the cursor is over a GraphNode the node takes the event and the
+	// graph never sees the motion, which is exactly when the highlight has to move.
+	virtual void _input(const Ref<InputEvent> &p_event) override;
+	// This one *is* _gui_input: picking an edge is about a press that landed on the graph
+	// itself. It runs before GraphEdit's own handler, so an edge that was hit can be taken
+	// before the graph reads the same press as the start of a box selection.
+	virtual void _gui_input(const Ref<InputEvent> &p_event) override;
+#endif // LIMBOAI_GDEXTENSION
+
+	// p_targets is the whole answer to "can this node be the destination" -- the graph is
+	// told, it does not work it out. Which states may be joined is the machine's business
+	// and lives with the view.
+	void begin_connect_from(const StringName &p_from, const Vector<StringName> &p_targets);
+	void cancel_connect();
+	bool is_connecting() const { return connecting; }
+
+	// Dropped without a signal: every caller of it is already about to redraw the graph.
+	void clear_picked_connection() { _clear_pick(); }
+
+	HSMGraphEdit();
+};
+
+#endif // HSM_GRAPH_EDIT_H
+
+#endif // ! TOOLS_ENABLED
