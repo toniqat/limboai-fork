@@ -96,6 +96,11 @@ protected:
 public:
 	void load_bt(const Ref<BehaviorTree> &p_behavior_tree);
 	void unload();
+	// A tree that is only being shown says so here -- the HSM view's preview is one. Editing
+	// there would put a change to the tree into the machine's undo history, and that history
+	// is a snapshot of the machine: the next Ctrl+Z would hand back a state nobody touched
+	// and leave the tree as it was.
+	void set_editable(bool p_editable) { editable = p_editable; }
 	_FORCE_INLINE_ Ref<BehaviorTree> get_bt() const { return bt; }
 	void update_tree() { _update_tree(); }
 	void update_task(const Ref<BTTask> &p_task);

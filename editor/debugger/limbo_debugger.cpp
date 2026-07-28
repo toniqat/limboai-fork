@@ -12,8 +12,10 @@
 #include "limbo_debugger.h"
 
 #include "../../bt/bt_instance.h"
+#include "../../bt/bt_state.h"
 #include "../../compat/debugger.h"
 #include "../../compat/object.h"
+#include "../../hsm/limbo_hsm.h"
 #include "../../util/limbo_string_names.h"
 #include "behavior_tree_data.h"
 
@@ -56,9 +58,14 @@ Error LimboDebugger::parse_message(void *p_user, const String &p_msg, const Arra
 		singleton->_track_tree(p_args[0]);
 	} else if (p_msg == "untrack_bt_player") {
 		singleton->_untrack_tree();
+	} else if (p_msg == "track_hsm") {
+		singleton->_track_hsm(p_args[0]);
+	} else if (p_msg == "untrack_hsm") {
+		singleton->_untrack_hsm();
 	} else if (p_msg == "start_session") {
 		singleton->session_active = true;
 		singleton->_send_active_bt_players();
+		singleton->_send_active_hsms();
 	} else if (p_msg == "stop_session") {
 		singleton->session_active = false;
 	} else {
@@ -143,6 +150,11 @@ void LimboDebugger::_untrack_tree() {
 	tracked_instance_id = 0;
 }
 
+// Three per instance, not two. The third is the agent, and it is the only thing that says
+// *whose* tree this is: a tree owned by a BTState is owned by a node deep inside a machine,
+// so the path the editor used to list was a path through the machinery rather than a name
+// anyone would recognize. Grouping is done here rather than on the far side because a node
+// path is a string over there, and taking the character out of a string is guesswork.
 void LimboDebugger::_send_active_bt_players() {
 	Array arr;
 	for (uint64_t instance_id : active_bt_instances) {
@@ -150,12 +162,186 @@ void LimboDebugger::_send_active_bt_players() {
 		BTInstance *inst = Object::cast_to<BTInstance>(OBJECT_DB_GET_INSTANCE(instance_id));
 		if (inst == nullptr) {
 			ERR_PRINT("LimboDebugger::_send_active_bt_players: Registered BTInstance not found (no longer exists?).");
+			arr.append(NodePath());
+			arr.append(NodePath());
 			continue;
 		}
 		Node *owner_node = inst->get_owner_node();
 		arr.append(owner_node ? owner_node->get_path() : NodePath());
+		// Asked of the root task rather than of the owner: a BTState and a BTPlayer are two
+		// unrelated classes with an agent each, and every task already carries the one its
+		// tree was instantiated for.
+		Node *agent = inst->get_root_task().is_valid() ? inst->get_root_task()->get_agent() : nullptr;
+		arr.append(agent ? agent->get_path() : NodePath());
 	}
 	EngineDebugger::get_singleton()->send_message("limboai:active_bt_players", arr);
+}
+
+// ── State machines ────────────────────────────────────────────────────────────
+
+void LimboDebugger::register_hsm(uint64_t p_instance_id) {
+	ERR_FAIL_COND(p_instance_id == 0);
+	if (!IS_DEBUGGER_ACTIVE() || active_hsms.has(p_instance_id)) {
+		return;
+	}
+	active_hsms.insert(p_instance_id);
+	if (session_active) {
+		_send_active_hsms();
+	}
+}
+
+void LimboDebugger::unregister_hsm(uint64_t p_instance_id) {
+	if (!active_hsms.has(p_instance_id)) {
+		return;
+	}
+	if (tracked_hsm_id == p_instance_id) {
+		_untrack_hsm();
+	}
+	active_hsms.erase(p_instance_id);
+	if (session_active) {
+		_send_active_hsms();
+	}
+}
+
+void LimboDebugger::_send_active_hsms() {
+	Array arr;
+	for (uint64_t instance_id : active_hsms) {
+		LimboHSM *hsm = Object::cast_to<LimboHSM>(OBJECT_DB_GET_INSTANCE(instance_id));
+		if (hsm == nullptr || !hsm->is_inside_tree()) {
+			continue;
+		}
+		arr.append(instance_id);
+		// The machine's own path as well as the agent's: the agent names the row, and the
+		// machine's path is what a state's path hangs off -- which is how a BTState in the
+		// picture is joined to the tree instance registered above.
+		arr.append(hsm->get_path());
+		Node *agent = hsm->get_agent();
+		arr.append(agent ? agent->get_path() : NodePath());
+	}
+	EngineDebugger::get_singleton()->send_message("limboai:active_hsms", arr);
+}
+
+void LimboDebugger::_track_hsm(uint64_t p_instance_id) {
+	tracked_hsm_id = p_instance_id;
+	if (tracked_hsm_id != 0) {
+		_send_hsm_structure();
+	}
+}
+
+void LimboDebugger::_untrack_hsm() {
+	tracked_hsm_id = 0;
+}
+
+void LimboDebugger::_send_hsm_structure() {
+	LimboHSM *root = Object::cast_to<LimboHSM>(OBJECT_DB_GET_INSTANCE(tracked_hsm_id));
+	if (root == nullptr) {
+		tracked_hsm_id = 0;
+		return;
+	}
+
+	Array states;
+	Array transitions;
+	_describe_machine(root, root, states, transitions);
+
+	Array arr;
+	arr.append(tracked_hsm_id);
+	arr.append(states);
+	arr.append(transitions);
+	// Where it stands right now rides along with the shape. Without it a machine picked
+	// mid-run shows nothing lit until it happens to move, and a machine that has settled
+	// somewhere may not move again at all.
+	arr.append(_active_chain(root));
+	EngineDebugger::get_singleton()->send_message("limboai:hsm_structure", arr);
+}
+
+// A state is named by its path down from the root. Names only have to be unique among
+// siblings, and an instance id means nothing to a reader -- a relative path is neither.
+void LimboDebugger::_describe_machine(LimboHSM *p_root, LimboState *p_machine, Array &r_states, Array &r_transitions) {
+	LimboHSM *machine = Object::cast_to<LimboHSM>(p_machine);
+	for (int i = 0; i < p_machine->get_child_count(); i++) {
+		LimboState *child = Object::cast_to<LimboState>(p_machine->get_child(i));
+		if (child == nullptr) {
+			continue;
+		}
+		Dictionary state;
+		state["path"] = String(p_root->get_path_to(child));
+		state["parent"] = p_machine == p_root ? String() : String(p_root->get_path_to(p_machine));
+		state["name"] = String(child->get_name());
+		state["initial"] = machine != nullptr && machine->get_initial_state() == child;
+
+		BTState *bt_state = Object::cast_to<BTState>(child);
+		if (bt_state != nullptr) {
+			// The tree's own path, which is what the node writes under itself. A built-in
+			// tree has none, and the picture then says only that there is one.
+			state["bt"] = bt_state->get_behavior_tree().is_valid() ? bt_state->get_behavior_tree()->get_path() : String();
+		}
+		r_states.append(state);
+
+		_describe_machine(p_root, child, r_states, r_transitions);
+	}
+
+	if (machine == nullptr) {
+		return;
+	}
+	Array rows = machine->get_transition_rows();
+	for (int i = 0; i < rows.size(); i++) {
+		Array row = rows[i];
+		LimboState *from = Object::cast_to<LimboState>(row[0]);
+		LimboState *to = Object::cast_to<LimboState>(row[1]);
+		if (to == nullptr) {
+			continue;
+		}
+		Array out;
+		// An empty `from` is ANYSTATE, which is the same empty string the editor's picture
+		// puts a ✱ node in for. Which machine the row belongs to is not sent: both ends of a
+		// transition are children of it, so the destination's parent already says.
+		out.append(from != nullptr ? String(p_root->get_path_to(from)) : String());
+		out.append(String(p_root->get_path_to(to)));
+		out.append(String(row[2]));
+		r_transitions.append(out);
+	}
+}
+
+PackedStringArray LimboDebugger::_active_chain(LimboHSM *p_root) {
+	PackedStringArray chain;
+	LimboState *state = p_root->get_active_state();
+	while (state != nullptr) {
+		chain.append(String(p_root->get_path_to(state)));
+		LimboHSM *nested = Object::cast_to<LimboHSM>(state);
+		if (nested == nullptr) {
+			break;
+		}
+		state = nested->get_active_state();
+	}
+	return chain;
+}
+
+void LimboDebugger::hsm_state_changed(LimboHSM *p_machine, LimboState *p_from) {
+	if (tracked_hsm_id == 0 || p_machine == nullptr) {
+		return;
+	}
+	LimboState *root_state = p_machine->get_root();
+	if (root_state == nullptr || uint64_t(root_state->get_instance_id()) != tracked_hsm_id) {
+		return;
+	}
+	LimboHSM *root = Object::cast_to<LimboHSM>(root_state);
+	if (root == nullptr) {
+		return;
+	}
+
+	Array arr;
+	arr.append(tracked_hsm_id);
+	LimboState *current = p_machine->get_active_state();
+	// `p_from` is what the machine was actually standing on a moment ago, which is not
+	// get_previous_active_state(): that one keeps its value while the machine is out, so a
+	// machine stepped into a second time would report the state it left the *first* time and
+	// draw an edge that was never taken. An empty `from` here is not ANYSTATE either -- it is
+	// "this machine was just entered", and drawing those two the same would sprout a line out
+	// of ✱ on every entry into a nested machine.
+	arr.append(p_from != nullptr ? String(root->get_path_to(p_from)) : String());
+	arr.append(current != nullptr ? String(root->get_path_to(current)) : String());
+	arr.append(_active_chain(root));
+	EngineDebugger::get_singleton()->send_message("limboai:hsm_state", arr);
 }
 
 void LimboDebugger::_on_bt_instance_updated(int _status, uint64_t p_instance_id) {

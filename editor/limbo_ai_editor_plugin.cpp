@@ -214,6 +214,23 @@ void LimboAIEditor::_new_bt() {
 	EditorInterface::get_singleton()->edit_resource(bt);
 }
 
+void LimboAIEditor::_new_hsm() {
+	Ref<HierarchicalStateMachine> hsm;
+	hsm.instantiate();
+	// The root state is not made here. HSMEditorView::edit_hsm() gives a machine without one
+	// a root, because a file dragged in from the FileSystem dock arrives without one too --
+	// filling it in on both paths would be the same rule written twice.
+	EditorInterface::get_singleton()->edit_resource(hsm);
+}
+
+void LimboAIEditor::_on_new_pressed() {
+	if (toolbar_mode == TOOLBAR_HSM) {
+		_new_hsm();
+	} else {
+		_new_bt();
+	}
+}
+
 void LimboAIEditor::_save_resource(const Ref<Resource> &p_res, const String &p_path) {
 	ERR_FAIL_COND(p_path.is_empty());
 	ERR_FAIL_COND(!p_path.begins_with("res://"));
@@ -265,19 +282,25 @@ void LimboAIEditor::_save_current_bt(const String &p_path) {
 	_save_resource(history[idx_history], p_path);
 }
 
-void LimboAIEditor::_load_bt(const String &p_path) {
+void LimboAIEditor::_load_resource(const String &p_path) {
 	ERR_FAIL_COND_MSG(p_path.is_empty(), "Empty p_path");
-	Ref<BehaviorTree> bt = RESOURCE_LOAD(p_path, "BehaviorTree");
-	ERR_FAIL_COND(!bt.is_valid());
-	if (bt->get_blackboard_plan().is_null()) {
-		bt->set_blackboard_plan(memnew(BlackboardPlan));
-	}
-	// if (history.find(bt) != -1) {
-	// 	history.erase(bt);
-	// 	history.push_back(bt);
-	// }
+	Ref<Resource> res = RESOURCE_LOAD(p_path, "Resource");
+	ERR_FAIL_COND(res.is_null());
 
-	EditorInterface::get_singleton()->edit_resource(bt);
+	BehaviorTree *bt = Object::cast_to<BehaviorTree>(res.ptr());
+	if (bt != nullptr) {
+		if (bt->get_blackboard_plan().is_null()) {
+			bt->set_blackboard_plan(memnew(BlackboardPlan));
+		}
+	} else if (Object::cast_to<HierarchicalStateMachine>(res.ptr()) == nullptr) {
+		// Refused here rather than filtered in the dialog: both kinds live in .tres, so a
+		// filter cannot tell them apart, and the third thing a .tres can be has to be turned
+		// away by something that has actually looked at it.
+		_popup_info_dialog(vformat(TTR("Not a behavior tree or a state machine: %s"), p_path));
+		return;
+	}
+
+	EditorInterface::get_singleton()->edit_resource(res);
 }
 
 void LimboAIEditor::_update_task_tree(const Ref<BehaviorTree> &p_bt, const Ref<BTTask> &p_specific_task) {
@@ -294,26 +317,71 @@ void LimboAIEditor::_update_task_tree(const Ref<BehaviorTree> &p_bt, const Ref<B
 	}
 }
 
+// `hsc` itself is never hidden by either of these. It carries the toolbar and the tab bar in
+// the widescreen layout, and those two have to stand whatever is open -- with nothing open
+// most of all, since the tab bar is how something gets opened again.
 void LimboAIEditor::_disable_editing() {
 	task_tree->unload();
-	task_palette->hide();
+	palette_holder->hide();
 	task_tree->hide();
 	hsm_view->hide();
-	hsc->show();
 	usage_hint->show();
+	_update_toolbar(TOOLBAR_NONE);
 }
 
 void LimboAIEditor::_show_editor_for(const Ref<Resource> &p_res) {
-	if (Object::cast_to<HierarchicalStateMachine>(p_res.ptr()) != nullptr) {
-		hsc->hide();
-		hsm_view->show();
-		return;
-	}
-	hsm_view->hide();
-	hsc->show();
+	bool is_hsm = Object::cast_to<HierarchicalStateMachine>(p_res.ptr()) != nullptr;
+
 	usage_hint->hide();
-	task_tree->show();
-	task_palette->show();
+	hsm_view->set_visible(is_hsm);
+	task_tree->set_visible(!is_hsm);
+	// The palette builds trees, so it goes with the tree rather than staying as a second
+	// pane the machine would then have to share the width with.
+	palette_holder->set_visible(!is_hsm);
+
+	_update_toolbar(is_hsm ? TOOLBAR_HSM : TOOLBAR_BT);
+}
+
+void LimboAIEditor::_update_toolbar(ToolbarMode p_mode) {
+	toolbar_mode = p_mode;
+
+	fav_tasks_hbox->set_visible(p_mode == TOOLBAR_BT);
+	hsm_tools_hbox->set_visible(p_mode == TOOLBAR_HSM);
+	new_script_btn->set_visible(p_mode == TOOLBAR_BT);
+	// Save is about the open document; with none there is nothing for it to mean. New and
+	// Load stay in all three states -- they are how a document comes to be open at all, and
+	// the empty screen's own hint points at them.
+	save_btn->set_visible(p_mode != TOOLBAR_NONE);
+
+	docs_sep->set_visible(p_mode != TOOLBAR_NONE);
+	script_sep->set_visible(p_mode == TOOLBAR_BT);
+
+	switch (p_mode) {
+		case TOOLBAR_HSM: {
+			new_btn->set_text(TTR("New State Machine"));
+			new_btn->set_tooltip_text(TTR("Create a new state machine."));
+			// Swapped rather than left alone: a Button puts its shortcut's *name* in its
+			// tooltip, so keeping the tree's would read "New Behavior Tree" on a button that
+			// makes a machine. The two carry the same keys, and only one is ever on the
+			// button, so they never compete.
+			new_btn->set_shortcut(LW_GET_SHORTCUT("limbo_ai/new_state_machine"));
+			save_dialog->set_title(TTR("Save State Machine"));
+		} break;
+		case TOOLBAR_BT: {
+			new_btn->set_text(TTR("New Behavior Tree"));
+			new_btn->set_tooltip_text(TTR("Create a new behavior tree."));
+			new_btn->set_shortcut(LW_GET_SHORTCUT("limbo_ai/new_behavior_tree"));
+			save_dialog->set_title(TTR("Save Behavior Tree"));
+		} break;
+		default: {
+			// Nothing open, so nothing to name it after. Whichever kind the button then makes
+			// is a guess, and the tree is the one the hint in the middle of the screen asks for.
+			new_btn->set_text(TTR("New"));
+			new_btn->set_tooltip_text(TTR("Create a new behavior tree."));
+			new_btn->set_shortcut(LW_GET_SHORTCUT("limbo_ai/new_behavior_tree"));
+			save_dialog->set_title(TTR("Save Behavior Tree"));
+		} break;
+	}
 }
 
 void LimboAIEditor::_on_hsm_edited() {
@@ -327,11 +395,15 @@ void LimboAIEditor::_on_hsm_edited() {
 void LimboAIEditor::edit_hsm(const Ref<HierarchicalStateMachine> &p_hsm, bool p_force_refresh) {
 	ERR_FAIL_COND_MSG(p_hsm.is_null(), "p_hsm is null");
 
-	if (!p_force_refresh && hsm_view->get_edited_hsm() == p_hsm) {
-		return;
-	}
+	// What the guard spares is the reload, and nothing else. The tab bar spans both kinds of
+	// document, so this view can already be holding the machine while the *other* half of the
+	// screen is the one on show -- and then clicking its tab has to bring this half back.
+	// Returning early here left the screen on the tree and the tab bar on the machine.
+	bool reload = p_force_refresh || hsm_view->get_edited_hsm() != p_hsm;
 
-	hsm_view->edit_hsm(p_hsm);
+	if (reload) {
+		hsm_view->edit_hsm(p_hsm);
+	}
 
 	if (!p_hsm->is_connected(LW_NAME(changed), callable_mp(this, &LimboAIEditor::_set_as_dirty))) {
 		p_hsm->connect(LW_NAME(changed), callable_mp(this, &LimboAIEditor::_set_as_dirty).bind(p_hsm, true));
@@ -354,23 +426,25 @@ void LimboAIEditor::edit_bt(const Ref<BehaviorTree> &p_behavior_tree, bool p_for
 
 	_switch_to_owner_scene_if_builtin(p_behavior_tree);
 
-	if (!p_force_refresh && task_tree->get_bt() == p_behavior_tree) {
-		return;
-	}
+	// Same as edit_hsm(): a tab whose tree is still loaded has to bring its half of the screen
+	// back, and only the reload below is worth skipping.
+	bool reload = p_force_refresh || task_tree->get_bt() != p_behavior_tree;
 
+	if (reload) {
 #ifdef LIMBOAI_MODULE
-	p_behavior_tree->editor_set_section_unfold("blackboard_plan", true);
-	p_behavior_tree->notify_property_list_changed();
+		p_behavior_tree->editor_set_section_unfold("blackboard_plan", true);
+		p_behavior_tree->notify_property_list_changed();
 #endif // LIMBOAI_MODULE
-	// Remember current search info.
-	if (idx_history >= 0 && idx_history < history.size() && task_tree->get_bt().ptr() == history[idx_history].ptr()) {
-		tab_search_context.insert(history[idx_history], task_tree->tree_search_get_search_info());
-	}
+		// Remember current search info.
+		if (idx_history >= 0 && idx_history < history.size() && task_tree->get_bt().ptr() == history[idx_history].ptr()) {
+			tab_search_context.insert(history[idx_history], task_tree->tree_search_get_search_info());
+		}
 
-	task_tree->load_bt(p_behavior_tree);
+		task_tree->load_bt(p_behavior_tree);
 
-	if (task_tree->get_bt().is_valid() && !task_tree->get_bt()->is_connected(LW_NAME(changed), callable_mp(this, &LimboAIEditor::_set_as_dirty))) {
-		task_tree->get_bt()->connect(LW_NAME(changed), callable_mp(this, &LimboAIEditor::_set_as_dirty).bind(task_tree->get_bt(), true));
+		if (task_tree->get_bt().is_valid() && !task_tree->get_bt()->is_connected(LW_NAME(changed), callable_mp(this, &LimboAIEditor::_set_as_dirty))) {
+			task_tree->get_bt()->connect(LW_NAME(changed), callable_mp(this, &LimboAIEditor::_set_as_dirty).bind(task_tree->get_bt(), true));
+		}
 	}
 
 	int idx = history.find(p_behavior_tree);
@@ -383,8 +457,10 @@ void LimboAIEditor::edit_bt(const Ref<BehaviorTree> &p_behavior_tree, bool p_for
 
 	_show_editor_for(p_behavior_tree);
 
-	// Restore search info from [tab_search_context].
-	if (idx_history >= 0 && idx_history < history.size()) {
+	// Restore search info from [tab_search_context]. Only on a reload: without one the panel
+	// is already showing this tab's search, and putting it back would be putting back what
+	// was saved the last time the tab was left rather than what is in it now.
+	if (reload && idx_history >= 0 && idx_history < history.size()) {
 		if (tab_search_context.has(history[idx_history])) {
 			task_tree->tree_search_set_search_info(tab_search_context[history[idx_history]]);
 		} else {
@@ -413,15 +489,15 @@ void LimboAIEditor::set_window_layout(const Ref<ConfigFile> &p_configuration) {
 		if (!FILE_EXISTS(path)) {
 			continue;
 		}
-		// A reopened tab may be either kind: the layout only remembers paths.
+		// A reopened tab may be either kind: the layout only remembers paths. The type is
+		// looked at here rather than left to _load_resource(), which would put a dialog on
+		// screen at startup over a file nobody asked for just now.
 		Ref<Resource> res = RESOURCE_LOAD(path, "Resource");
 		if (res.is_null()) {
 			continue;
 		}
-		if (Object::cast_to<HierarchicalStateMachine>(res.ptr()) != nullptr) {
-			EditorInterface::get_singleton()->edit_resource(res);
-		} else if (Object::cast_to<BehaviorTree>(res.ptr()) != nullptr) {
-			_load_bt(path);
+		if (Object::cast_to<HierarchicalStateMachine>(res.ptr()) != nullptr || Object::cast_to<BehaviorTree>(res.ptr()) != nullptr) {
+			_load_resource(path);
 		}
 	}
 
@@ -1666,9 +1742,12 @@ void LimboAIEditor::_notification(int p_what) {
 		case NOTIFICATION_READY: {
 			// **** Signals
 			save_dialog->connect("file_selected", callable_mp(this, &LimboAIEditor::_save_current_bt));
-			load_dialog->connect("file_selected", callable_mp(this, &LimboAIEditor::_load_bt));
+			load_dialog->connect("file_selected", callable_mp(this, &LimboAIEditor::_load_resource));
 			extract_dialog->connect("file_selected", callable_mp(this, &LimboAIEditor::_extract_subtree));
-			new_btn->connect(LW_NAME(pressed), callable_mp(this, &LimboAIEditor::_new_bt));
+			new_btn->connect(LW_NAME(pressed), callable_mp(this, &LimboAIEditor::_on_new_pressed));
+			hsm_add_state_btn->connect(LW_NAME(pressed), callable_mp(hsm_view, &HSMEditorView::add_state));
+			hsm_add_machine_btn->connect(LW_NAME(pressed), callable_mp(hsm_view, &HSMEditorView::add_machine));
+			hsm_remove_btn->connect(LW_NAME(pressed), callable_mp(hsm_view, &HSMEditorView::remove_selected));
 			load_btn->connect(LW_NAME(pressed), callable_mp(this, &LimboAIEditor::_popup_file_dialog).bind(load_dialog));
 			task_tree->connect("rmb_pressed", callable_mp(this, &LimboAIEditor::_on_tree_rmb));
 			task_tree->connect("task_selected", callable_mp(this, &LimboAIEditor::_on_tree_task_selected));
@@ -1713,6 +1792,13 @@ void LimboAIEditor::_notification(int p_what) {
 			new_script_btn->set_button_icon(get_theme_icon(LW_NAME(ScriptCreate), LW_NAME(EditorIcons)));
 			misc_btn->set_button_icon(get_theme_icon(LW_NAME(Tools), LW_NAME(EditorIcons)));
 
+			// The plugin's own icons for the two resource types, rather than a generic plus:
+			// what these buttons add *is* a state and a machine, and the same two pictures
+			// name them in the FileSystem dock and on the inspector.
+			hsm_add_state_btn->set_button_icon(LimboUtility::get_singleton()->get_task_icon("HSMStateSpec"));
+			hsm_add_machine_btn->set_button_icon(LimboUtility::get_singleton()->get_task_icon("HierarchicalStateMachine"));
+			hsm_remove_btn->set_button_icon(get_theme_icon(LW_NAME(Remove), LW_NAME(EditorIcons)));
+
 			_update_favorite_tasks();
 		} break;
 		case EditorSettings::NOTIFICATION_EDITOR_SETTINGS_CHANGED: {
@@ -1729,7 +1815,7 @@ void LimboAIEditor::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_add_task_with_prototype", "prototype_task"), &LimboAIEditor::_add_task_with_prototype);
 	ClassDB::bind_method(D_METHOD("_new_bt"), &LimboAIEditor::_new_bt);
 	ClassDB::bind_method(D_METHOD("_save_bt", "path"), &LimboAIEditor::_save_current_bt);
-	ClassDB::bind_method(D_METHOD("_load_bt", "path"), &LimboAIEditor::_load_bt);
+	ClassDB::bind_method(D_METHOD("_load_resource", "path"), &LimboAIEditor::_load_resource);
 	ClassDB::bind_method(D_METHOD("_update_task_tree", "bt", "specific_task"), &LimboAIEditor::_update_task_tree, DEFVAL(Variant()));
 	ClassDB::bind_method(D_METHOD("edit_bt", "behavior_tree", "force_refresh"), &LimboAIEditor::edit_bt, Variant(false));
 	ClassDB::bind_method(D_METHOD("_reload_modified"), &LimboAIEditor::_reload_modified);
@@ -1772,6 +1858,9 @@ LimboAIEditor::LimboAIEditor() {
 	LW_SHORTCUT("limbo_ai/paste_task_after", TTR("Paste After Selected"), (Key)(LW_KEY_MASK(CMD_OR_CTRL) | LW_KEY_MASK(SHIFT) | LW_KEY(V)));
 
 	LW_SHORTCUT("limbo_ai/new_behavior_tree", TTR("New Behavior Tree"), (Key)(LW_KEY_MASK(CMD_OR_CTRL) | LW_KEY_MASK(ALT) | LW_KEY(N)));
+	// The same keys as above, and deliberately so: only one of the two is ever on the New
+	// button, and which one it is says what the button is about to make.
+	LW_SHORTCUT("limbo_ai/new_state_machine", TTR("New State Machine"), (Key)(LW_KEY_MASK(CMD_OR_CTRL) | LW_KEY_MASK(ALT) | LW_KEY(N)));
 	LW_SHORTCUT("limbo_ai/save_behavior_tree", TTR("Save Behavior Tree"), (Key)(LW_KEY_MASK(CMD_OR_CTRL) | LW_KEY_MASK(ALT) | LW_KEY(S)));
 	LW_SHORTCUT("limbo_ai/load_behavior_tree", TTR("Load Behavior Tree"), (Key)(LW_KEY_MASK(CMD_OR_CTRL) | LW_KEY_MASK(ALT) | LW_KEY(L)));
 	LW_SHORTCUT("limbo_ai/open_debugger", TTR("Open Debugger"), (Key)(LW_KEY_MASK(CMD_OR_CTRL) | LW_KEY_MASK(ALT) | LW_KEY(D)));
@@ -1794,7 +1883,9 @@ LimboAIEditor::LimboAIEditor() {
 
 	load_dialog = memnew(FileDialog);
 	load_dialog->set_file_mode(FileDialog::FILE_MODE_OPEN_FILE);
-	load_dialog->set_title(TTR("Load Behavior Tree"));
+	// Not per document kind, unlike the save dialog: saving is about the one thing already
+	// open, opening is about anything on disk.
+	load_dialog->set_title(TTR("Load Behavior Tree or State Machine"));
 	load_dialog->add_filter("*.tres");
 	load_dialog->hide();
 	add_child(load_dialog);
@@ -1811,6 +1902,24 @@ LimboAIEditor::LimboAIEditor() {
 	vbox->set_anchor(SIDE_BOTTOM, ANCHOR_END);
 	add_child(vbox);
 
+	// Above the toolbar, because the toolbar answers to it: which buttons stand there is
+	// decided by which tab is on. Reading downward, the tabs say what the document is and
+	// the row under them says what can be done to it.
+	tab_bar_panel = memnew(PanelContainer);
+	vbox->add_child(tab_bar_panel);
+	tab_bar_container = memnew(HBoxContainer);
+	tab_bar_panel->add_child(tab_bar_container);
+
+	tab_bar = memnew(TabBar);
+	tab_bar->set_select_with_rmb(true);
+	tab_bar->set_drag_to_rearrange_enabled(true);
+	tab_bar->set_max_tab_width(int(EDITOR_GET("interface/scene_tabs/maximum_width")) * EDSCALE);
+	tab_bar->set_auto_translate_mode(AUTO_TRANSLATE_MODE_DISABLED);
+	tab_bar->set_tab_close_display_policy(TabBar::CLOSE_BUTTON_SHOW_ACTIVE_ONLY);
+	tab_bar->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	tab_bar->set_focus_mode(FocusMode::FOCUS_NONE);
+	tab_bar_container->add_child(tab_bar);
+
 	HBoxContainer *toolbar = memnew(HBoxContainer);
 	vbox->add_child(toolbar);
 
@@ -1823,19 +1932,43 @@ LimboAIEditor::LimboAIEditor() {
 	fav_tasks_hbox = memnew(HBoxContainer);
 	toolbar->add_child(fav_tasks_hbox);
 
-	toolbar->add_child(memnew(VSeparator));
+	// The machine's counterpart to the favorite tasks, and in the same place: what the left
+	// end of this row offers is always "the pieces the open document is made of".
+	hsm_tools_hbox = memnew(HBoxContainer);
+	toolbar->add_child(hsm_tools_hbox);
+
+	hsm_add_state_btn = memnew(Button);
+	hsm_add_state_btn->set_text(TTR("Add State"));
+	hsm_add_state_btn->set_tooltip_text(TTR("Add a state inside the selected one, which is what makes it a machine."));
+	hsm_add_state_btn->set_flat(true);
+	hsm_add_state_btn->set_focus_mode(Control::FOCUS_NONE);
+	hsm_tools_hbox->add_child(hsm_add_state_btn);
+
+	hsm_add_machine_btn = memnew(Button);
+	hsm_add_machine_btn->set_text(TTR("Add Machine"));
+	hsm_add_machine_btn->set_tooltip_text(TTR("Add a state that already holds one, so that it is drawn as a machine."));
+	hsm_add_machine_btn->set_flat(true);
+	hsm_add_machine_btn->set_focus_mode(Control::FOCUS_NONE);
+	hsm_tools_hbox->add_child(hsm_add_machine_btn);
+
+	hsm_remove_btn = memnew(Button);
+	hsm_remove_btn->set_text(TTR("Remove"));
+	hsm_remove_btn->set_tooltip_text(TTR("Remove the selected state."));
+	hsm_remove_btn->set_flat(true);
+	hsm_remove_btn->set_focus_mode(Control::FOCUS_NONE);
+	hsm_tools_hbox->add_child(hsm_remove_btn);
+
+	docs_sep = memnew(VSeparator);
+	toolbar->add_child(docs_sep);
 
 	new_btn = memnew(Button);
-	new_btn->set_text(TTR("New"));
-	new_btn->set_tooltip_text(TTR("Create a new behavior tree."));
-	new_btn->set_shortcut(LW_GET_SHORTCUT("limbo_ai/new_behavior_tree"));
 	new_btn->set_flat(true);
 	new_btn->set_focus_mode(Control::FOCUS_NONE);
 	toolbar->add_child(new_btn);
 
 	load_btn = memnew(Button);
 	load_btn->set_text(TTR("Load"));
-	load_btn->set_tooltip_text(TTR("Load behavior tree from a resource file."));
+	load_btn->set_tooltip_text(TTR("Load a behavior tree or state machine from a resource file."));
 	load_btn->set_shortcut(LW_GET_SHORTCUT("limbo_ai/load_behavior_tree"));
 	load_btn->set_flat(true);
 	load_btn->set_focus_mode(Control::FOCUS_NONE);
@@ -1843,13 +1976,14 @@ LimboAIEditor::LimboAIEditor() {
 
 	save_btn = memnew(Button);
 	save_btn->set_text(TTR("Save"));
-	save_btn->set_tooltip_text(TTR("Save edited behavior tree to a resource file."));
+	save_btn->set_tooltip_text(TTR("Save the edited document to a resource file."));
 	save_btn->set_shortcut(LW_GET_SHORTCUT("limbo_ai/save_behavior_tree"));
 	save_btn->set_flat(true);
 	save_btn->set_focus_mode(Control::FOCUS_NONE);
 	toolbar->add_child(save_btn);
 
-	toolbar->add_child(memnew(VSeparator));
+	script_sep = memnew(VSeparator);
+	toolbar->add_child(script_sep);
 
 	new_script_btn = memnew(Button);
 	new_script_btn->set_text(TTR("New Task"));
@@ -1884,21 +2018,6 @@ LimboAIEditor::LimboAIEditor() {
 	version_spacer->set_custom_minimum_size(Size2(2, 0) * EDSCALE);
 	version_hbox->add_child(version_spacer);
 
-	tab_bar_panel = memnew(PanelContainer);
-	vbox->add_child(tab_bar_panel);
-	tab_bar_container = memnew(HBoxContainer);
-	tab_bar_panel->add_child(tab_bar_container);
-
-	tab_bar = memnew(TabBar);
-	tab_bar->set_select_with_rmb(true);
-	tab_bar->set_drag_to_rearrange_enabled(true);
-	tab_bar->set_max_tab_width(int(EDITOR_GET("interface/scene_tabs/maximum_width")) * EDSCALE);
-	tab_bar->set_auto_translate_mode(AUTO_TRANSLATE_MODE_DISABLED);
-	tab_bar->set_tab_close_display_policy(TabBar::CLOSE_BUTTON_SHOW_ACTIVE_ONLY);
-	tab_bar->set_h_size_flags(Control::SIZE_EXPAND_FILL);
-	tab_bar->set_focus_mode(FocusMode::FOCUS_NONE);
-	tab_bar_container->add_child(tab_bar);
-
 	tab_menu = memnew(PopupMenu);
 	add_child(tab_menu);
 
@@ -1917,6 +2036,19 @@ LimboAIEditor::LimboAIEditor() {
 	task_tree->hide();
 	hsc->add_child(task_tree);
 
+	// Beside the task tree, not beside `hsc`. The two are the same kind of thing -- the body
+	// of the open document -- and standing in the same place is what lets the toolbar and the
+	// tab bar stay up while they take turns. As a sibling of `hsc` the only way to raise one
+	// was to hide the other's whole container, and the widescreen layout keeps those two rows
+	// inside it.
+	//
+	// `hsc` splits the first two of its *visible* children, so at most two of the four ever
+	// stand at once: tree + palette, machine alone, or the hint alone.
+	hsm_view = memnew(HSMEditorView);
+	hsm_view->hide();
+	hsc->add_child(hsm_view);
+	hsm_view->connect("hsm_edited", callable_mp(this, &LimboAIEditor::_on_hsm_edited));
+
 	usage_hint = memnew(Panel);
 	usage_hint->set_v_size_flags(SIZE_EXPAND_FILL);
 	usage_hint->set_h_size_flags(SIZE_EXPAND_FILL);
@@ -1933,13 +2065,14 @@ LimboAIEditor::LimboAIEditor() {
 	task_palette = memnew(TaskPalette());
 	task_palette->hide();
 	hsc->add_child(task_palette);
+	// What gets put away when the palette is not wanted. In the classic layout that is the
+	// palette itself; the widescreen one wraps it in a column with a heading over it, and
+	// hiding only the palette would leave the heading standing over nothing.
+	palette_holder = task_palette;
 
-	// A sibling of hsc rather than a child: the two halves fill the same space and only
-	// one of them stands at a time, which is what the tab's type decides.
-	hsm_view = memnew(HSMEditorView);
-	hsm_view->hide();
-	vbox->add_child(hsm_view);
-	hsm_view->connect("hsm_edited", callable_mp(this, &LimboAIEditor::_on_hsm_edited));
+	// Nothing is open yet, and set_window_layout() may not reopen anything either -- so the
+	// starting state is settled here rather than left to the first document.
+	_update_toolbar(TOOLBAR_NONE);
 
 	banners = memnew(VBoxContainer);
 	vbox->add_child(banners);
@@ -1966,12 +2099,21 @@ LimboAIEditor::LimboAIEditor() {
 
 		task_palette->reparent(sidebar_vbox);
 		task_palette->set_v_size_flags(SIZE_EXPAND_FILL);
+		// The palette is now inside a column with a heading, so the column is what goes away
+		// with it -- see palette_holder. The "put away" state moves with the job: the palette
+		// itself goes back to visible, and the column starts down, or the screen opens on a
+		// heading with nothing under it.
+		task_palette->show();
+		sidebar_vbox->hide();
+		palette_holder = sidebar_vbox;
 
 		VBoxContainer *editor_vbox = memnew(VBoxContainer);
 		hsc->add_child(editor_vbox);
-		toolbar->reparent(editor_vbox);
 		tab_bar_panel->reparent(editor_vbox);
+		toolbar->reparent(editor_vbox);
 		task_tree->reparent(editor_vbox);
+		// The machine goes wherever the tree goes: the two take turns in one place.
+		hsm_view->reparent(editor_vbox);
 		usage_hint->reparent(editor_vbox);
 		banners->reparent(editor_vbox);
 	}

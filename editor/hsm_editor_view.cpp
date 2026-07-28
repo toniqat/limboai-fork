@@ -17,6 +17,7 @@
 #include "../compat/editor_scale.h"
 #include "../compat/limbo_compat.h"
 #include "../compat/translation.h"
+#include "../util/limbo_string_names.h"
 #include "../util/limbo_utility.h"
 
 #ifdef LIMBOAI_MODULE
@@ -72,6 +73,16 @@ const int NEST_GRAB_BAND = 16;
 // would be a picture of a diff rather than of the machine. They are dimmed because the
 // file being edited is not where they can be changed.
 const float INHERITED_ALPHA = 0.55;
+
+// What a state that a running machine is not standing in is dimmed to. The same reading as
+// above and deliberately the same figure: in both cases the box is drawn because the machine
+// has it, and dimmed because it is not the one being talked about.
+const float INACTIVE_ALPHA = 0.55;
+
+// How long an edge stays lit after it was taken. Long enough to catch out of the corner of an
+// eye, short enough that a machine flipping between two states does not simply leave both
+// lines on -- at which point the glow stops meaning "just now".
+const float PULSE_SECONDS = 0.8;
 
 // ── Copying an authored tree ──────────────────────────────────────────────────
 
@@ -205,6 +216,7 @@ GraphNode *HSMEditorView::_make_node(const Ref<HSMStateSpec> &p_state, const Ref
 	}
 	node->set_name(_node_name_for(p_state));
 	node->set_title(String(p_state->get_state_name()));
+	base_titles[node->get_name()] = node->get_title();
 
 	Color color = COLOR_PLAIN;
 	// Empty unless there is something the color cannot say. A plain state used to read
@@ -219,7 +231,7 @@ GraphNode *HSMEditorView::_make_node(const Ref<HSMStateSpec> &p_state, const Ref
 		// and which one it is has no other place on the graph.
 		String path = p_state->get_behavior_tree()->get_path();
 		kind = path.is_empty() ? TTR("behavior tree") : path.get_file();
-		node->set_tooltip_text(TTR("Double-click to open this behavior tree."));
+		node->set_tooltip_text(TTR("Its behavior tree is shown on the right."));
 	}
 
 	// A GraphNode needs at least one child control before slot 0 exists. When there is
@@ -266,6 +278,7 @@ GraphNode *HSMEditorView::_make_anystate_node(const Ref<HSMStateSpec> &p_machine
 	GraphNode *node = memnew(GraphNode);
 	node->set_name(_anystate_node_name_for(p_machine));
 	node->set_title(String::utf8("✱ ANYSTATE"));
+	base_titles[node->get_name()] = node->get_title();
 
 	// It used to say "no state is being left" here. That is not what it *is*, it is what
 	// cannot be done to it, and where that belongs is the moment someone tries: aiming an
@@ -687,6 +700,11 @@ void HSMEditorView::refresh() {
 	anystate_machines.clear();
 	nests.clear();
 	nest_of.clear();
+	base_titles.clear();
+	// The nodes those edges ran between are gone, and an activity left standing would be
+	// handed to whichever connection inherits the pair of names.
+	pulses.clear();
+	set_process(false);
 	merged_root.unref();
 
 	if (hsm.is_null() || hsm->get_effective_root().is_null()) {
@@ -758,6 +776,12 @@ void HSMEditorView::_restore_root(const Ref<HierarchicalStateMachine> &p_target,
 }
 
 void HSMEditorView::edit_hsm(const Ref<HierarchicalStateMachine> &p_hsm) {
+	if (hsm != p_hsm) {
+		// The preview belongs to a pick made in the machine being left. A refresh does not
+		// clear it -- an edit to the machine is not a reason for the tree beside it to blink
+		// away -- but another file is.
+		_preview_tree(Ref<HSMStateSpec>());
+	}
 	hsm = p_hsm;
 	if (hsm.is_valid() && hsm->get_root().is_null()) {
 		// A file created from the FileSystem dock arrives empty. Giving it a root here
@@ -796,6 +820,7 @@ void HSMEditorView::_on_list_item_selected() {
 	const DrawnState *entry = drawn.getptr(*name);
 	if (entry != nullptr) {
 		_inspect(entry->spec);
+		_preview_tree(entry->spec);
 	}
 }
 
@@ -806,7 +831,10 @@ void HSMEditorView::_on_list_item_selected() {
 // An inherited state goes nowhere: the Inspector would be editing a state that is thrown
 // away on the next refresh, and every keystroke would be silently lost.
 void HSMEditorView::_inspect(const Ref<HSMStateSpec> &p_drawn) {
-	if (p_drawn.is_null()) {
+	if (p_drawn.is_null() || read_only) {
+		// Read-only means these states stand for nodes in a running game rather than for
+		// anything on disk. Handing one to the Inspector would offer fields that write to a
+		// copy thrown away on the next refresh.
 		return;
 	}
 	if (p_drawn->is_inherited()) {
@@ -840,6 +868,7 @@ void HSMEditorView::_on_graph_node_selected(Node *p_node) {
 	updating = false;
 
 	_inspect(entry->spec);
+	_preview_tree(entry->spec);
 }
 
 void HSMEditorView::_drill_into(const Ref<HSMStateSpec> &p_state) {
@@ -857,8 +886,51 @@ void HSMEditorView::_drill_into(const Ref<HSMStateSpec> &p_state) {
 	EditorInterface::get_singleton()->edit_resource(tree);
 }
 
+void HSMEditorView::_preview_tree(const Ref<HSMStateSpec> &p_state) {
+	// Said out loud whichever half is listening. On the main screen nobody is; in the
+	// debugger the pane that answers is the live one standing outside this view, because a
+	// tree that is running is not a thing a file can be read for.
+	emit_signal("state_picked", p_state);
+	if (read_only) {
+		return;
+	}
+
+	Ref<BehaviorTree> tree = p_state.is_valid() ? p_state->get_behavior_tree() : Ref<BehaviorTree>();
+
+	if (tree.is_null()) {
+		// Hidden rather than emptied. An empty pane with a title over it reads as something
+		// that failed to load, and the graph has a better use for the room.
+		previewed_tree.unref();
+		tree_view->unload();
+		tree_box->hide();
+		return;
+	}
+
+	previewed_tree = tree;
+	if (tree_view->get_bt() != tree) {
+		tree_view->load_bt(tree);
+	}
+	// The file name, which is what the node on the graph writes under itself too. A built-in
+	// tree has no path and there is nothing else to call it by; the full path is the tooltip
+	// because the label is clipped to whatever width the pane has been dragged to.
+	String path = tree->get_path();
+	tree_title->set_text(path.is_empty() ? TTR("Behavior Tree") : path.get_file());
+	tree_title->set_tooltip_text(path);
+	tree_box->show();
+}
+
+// The tree the pane is showing, not the tree the picked state holds. They are the same tree
+// while the pane is up -- but the button is under the title, and the title names what is
+// drawn below it.
+void HSMEditorView::_on_open_tree_pressed() {
+	if (previewed_tree.is_null()) {
+		return;
+	}
+	EditorInterface::get_singleton()->edit_resource(previewed_tree);
+}
+
 void HSMEditorView::_on_list_item_activated() {
-	_drill_into(_selected_spec());
+	_preview_tree(_selected_spec());
 }
 
 void HSMEditorView::_on_graph_node_gui_input(const Ref<InputEvent> &p_event, const StringName &p_name) {
@@ -888,7 +960,7 @@ void HSMEditorView::_on_graph_node_gui_input(const Ref<InputEvent> &p_event, con
 	if (node != nullptr) {
 		node->accept_event();
 	}
-	_drill_into(entry->spec);
+	_preview_tree(entry->spec);
 }
 
 // ── The node's own menu ───────────────────────────────────────────────────────
@@ -905,6 +977,9 @@ Ref<HSMStateSpec> HSMEditorView::_machine_for_node(const StringName &p_name, Ref
 }
 
 void HSMEditorView::_open_node_menu(const StringName &p_name) {
+	if (read_only) {
+		return;
+	}
 	Ref<HSMStateSpec> state;
 	Ref<HSMStateSpec> machine = _machine_for_node(p_name, state);
 	if (machine.is_null()) {
@@ -1053,6 +1128,9 @@ void HSMEditorView::_on_connection_picked(const StringName &p_from, const String
 }
 
 void HSMEditorView::_on_connection_menu_requested(const StringName &p_from, const StringName &p_to) {
+	if (read_only) {
+		return;
+	}
 	Ref<HSMStateSpec> from_state;
 	Ref<HSMStateSpec> to_state;
 	Ref<HSMStateSpec> machine = _machine_for_node(p_from, from_state);
@@ -1159,6 +1237,9 @@ bool HSMEditorView::_remove_transition(const Ref<HSMStateSpec> &p_machine, const
 // only siblings: a machine owns the transitions between its own children, and LimboHSM
 // refuses anything else at wiring time.
 void HSMEditorView::_begin_connect_from(const StringName &p_name) {
+	if (read_only) {
+		return;
+	}
 	Ref<HSMStateSpec> state;
 	Ref<HSMStateSpec> machine = _machine_for_node(p_name, state);
 	if (machine.is_null()) {
@@ -1176,6 +1257,13 @@ void HSMEditorView::_begin_connect_from(const StringName &p_name) {
 
 void HSMEditorView::_on_graph_end_node_move() {
 	if (updating || hsm.is_null()) {
+		return;
+	}
+	if (read_only) {
+		// Dragging still works -- untangling a picture is reading it, not changing it -- but
+		// where a node was left is not written down. There is no file to write it to: this
+		// machine was built out of what the game reported a moment ago.
+		_fit_nests();
 		return;
 	}
 	// Taken before a single position is written, and thrown away unread when nothing moved --
@@ -1340,15 +1428,29 @@ void HSMEditorView::_detach_state(const Ref<HSMStateSpec> &p_machine, const Ref<
 	p_machine->set_transitions(rows);
 }
 
-void HSMEditorView::_on_add_pressed() {
+void HSMEditorView::add_state() {
+	if (read_only) {
+		return;
+	}
 	Ref<HSMStateSpec> drawn_parent = _selected_spec();
 	if (drawn_parent.is_null()) {
 		drawn_parent = merged_root;
 	}
-	_add_child_state(drawn_parent);
+	_add_child_state(drawn_parent, false);
 }
 
-void HSMEditorView::_add_child_state(const Ref<HSMStateSpec> &p_drawn_parent) {
+void HSMEditorView::add_machine() {
+	if (read_only) {
+		return;
+	}
+	Ref<HSMStateSpec> drawn_parent = _selected_spec();
+	if (drawn_parent.is_null()) {
+		drawn_parent = merged_root;
+	}
+	_add_child_state(drawn_parent, true);
+}
+
+void HSMEditorView::_add_child_state(const Ref<HSMStateSpec> &p_drawn_parent, bool p_as_machine) {
 	if (hsm.is_null()) {
 		return;
 	}
@@ -1360,25 +1462,40 @@ void HSMEditorView::_add_child_state(const Ref<HSMStateSpec> &p_drawn_parent) {
 	Ref<HSMStateSpec> parent = _authored_of(drawn_parent, true);
 	ERR_FAIL_COND(parent.is_null());
 
-	// A state becomes a machine by gaining a child. There is no separate button for it
-	// because there is no separate thing.
 	Ref<HSMStateSpec> spec;
 	spec.instantiate();
 	// Named against what is drawn, not against what this file holds: a stub's children
 	// are only half of the machine, and the other half is where a clash would come from.
 	spec->set_state_name(_unique_child_name(drawn_parent));
 
+	if (p_as_machine) {
+		// A state becomes a machine by gaining a child, so "Add Machine" is "Add State" plus
+		// the first one. It is a separate button rather than a separate thing: an empty
+		// machine draws as an ordinary state, and a box that only becomes a box on the
+		// second click is a box nobody finds.
+		Ref<HSMStateSpec> child;
+		child.instantiate();
+		child->set_state_name("State");
+		TypedArray<HSMStateSpec> inner;
+		inner.append(child);
+		spec->set_children(inner);
+		// `initial_child` is left alone on purpose: get_initial_child() already falls back to
+		// the first child, and writing the fallback into the file makes a declaration out of
+		// something nobody declared -- which is exactly what a machine inheriting this one
+		// would then be unable to say nothing about.
+	}
+
 	TypedArray<HSMStateSpec> children = parent->get_children();
 	children.append(spec);
 	parent->set_children(children);
 
-	_commit_edit(TTR("Add State"), before);
+	_commit_edit(p_as_machine ? TTR("Add Machine") : TTR("Add State"), before);
 	refresh();
 	emit_signal("hsm_edited");
 }
 
-void HSMEditorView::_on_delete_pressed() {
-	if (hsm.is_null()) {
+void HSMEditorView::remove_selected() {
+	if (hsm.is_null() || read_only) {
 		return;
 	}
 	Ref<HSMStateSpec> spec = _selected_spec();
@@ -1421,7 +1538,7 @@ bool HSMEditorView::_remove_drawn(const Ref<HSMStateSpec> &p_drawn) {
 // and there are no ports to drag -- so the ports it used to carry are gone from the
 // signature too.
 void HSMEditorView::_on_connect_to_requested(const StringName &p_from, const StringName &p_to) {
-	if (hsm.is_null()) {
+	if (hsm.is_null() || read_only) {
 		return;
 	}
 	const DrawnState *to_entry = drawn.getptr(p_to);
@@ -1484,7 +1601,7 @@ void HSMEditorView::_on_connect_to_requested(const StringName &p_from, const Str
 }
 
 void HSMEditorView::_on_delete_nodes_request(const TypedArray<StringName> &p_nodes) {
-	if (hsm.is_null()) {
+	if (hsm.is_null() || read_only) {
 		return;
 	}
 	Ref<HSMStateSpec> before = _snapshot();
@@ -1506,8 +1623,105 @@ void HSMEditorView::_on_delete_nodes_request(const TypedArray<StringName> &p_nod
 	}
 }
 
+// ── Watching one that runs ─────────────────────────────────────────
+
+void HSMEditorView::set_read_only(bool p_read_only) {
+	read_only = p_read_only;
+	if (read_only) {
+		// The tree a state holds is shown by the live view standing outside this one, so the
+		// pane here would be the same tree twice -- once as it is on disk and once as it is
+		// running, side by side, differing whenever the file has been touched since launch.
+		tree_box->hide();
+	}
+}
+
+void HSMEditorView::set_active_chain(const Vector<Ref<HSMStateSpec>> &p_chain) {
+	Vector<StringName> lit;
+	StringName leaf;
+	for (int i = 0; i < p_chain.size(); i++) {
+		if (p_chain[i].is_null()) {
+			continue;
+		}
+		const StringName *name = node_names.getptr(p_chain[i]->get_instance_id());
+		if (name == nullptr) {
+			continue;
+		}
+		lit.push_back(*name);
+		leaf = *name;
+	}
+
+	for (int i = 0; i < graph->get_child_count(); i++) {
+		GraphNode *node = Object::cast_to<GraphNode>(graph->get_child(i));
+		if (node == nullptr) {
+			continue;
+		}
+		StringName name = node->get_name();
+		// With nothing lit, nothing is dimmed either. An empty chain is a machine that is not
+		// running, and dimming the whole picture for that would read as a fault.
+		bool on = lit.is_empty() || lit.has(name);
+		node->set_self_modulate(Color(1, 1, 1, on ? 1.0 : INACTIVE_ALPHA));
+
+		const String *base = base_titles.getptr(name);
+		if (base != nullptr) {
+			// The innermost one, marked. The chain is a line of boxes inside boxes and every
+			// one of them is lit, so without this the machine says which rooms it is in but
+			// not which one it is standing in.
+			node->set_title(name == leaf ? *base + String::utf8("  ●") : *base);
+		}
+	}
+}
+
+void HSMEditorView::pulse_transition(const Ref<HSMStateSpec> &p_from, const Ref<HSMStateSpec> &p_to) {
+	if (p_from.is_null() || p_to.is_null()) {
+		// An entry into a machine comes from no state at all. There is no line for it, which
+		// is the same reason the graph does not draw one.
+		return;
+	}
+	const StringName *from = node_names.getptr(p_from->get_instance_id());
+	const StringName *to = node_names.getptr(p_to->get_instance_id());
+	if (from == nullptr || to == nullptr || *from == *to) {
+		return;
+	}
+
+	for (int i = 0; i < pulses.size(); i++) {
+		if (pulses[i].from == *from && pulses[i].to == *to) {
+			pulses.write[i].amount = 1.0;
+			set_process(true);
+			return;
+		}
+	}
+	Pulse pulse;
+	pulse.from = *from;
+	pulse.to = *to;
+	pulse.amount = 1.0;
+	pulses.push_back(pulse);
+	set_process(true);
+}
+
+// The fade. GraphEdit is told an amount per connection and paints the line with it, so the
+// only thing kept here is how much is left -- and the process is switched off again the
+// moment nothing is glowing, because a debugger tab left open is a tab left open for hours.
+void HSMEditorView::_fade_pulses(double p_delta) {
+	for (int i = pulses.size() - 1; i >= 0; i--) {
+		float amount = pulses[i].amount - float(p_delta) / PULSE_SECONDS;
+		if (amount <= 0.0) {
+			graph->set_connection_activity(pulses[i].from, 0, pulses[i].to, 0, 0.0);
+			pulses.remove_at(i);
+			continue;
+		}
+		pulses.write[i].amount = amount;
+		graph->set_connection_activity(pulses[i].from, 0, pulses[i].to, 0, amount);
+	}
+	if (pulses.is_empty()) {
+		set_process(false);
+	}
+}
+
 void HSMEditorView::_notification(int p_what) {
 	switch (p_what) {
+		case NOTIFICATION_PROCESS: {
+			_fade_pulses(get_process_delta_time());
+		} break;
 		case NOTIFICATION_READY: {
 			state_list->connect("item_selected", callable_mp(this, &HSMEditorView::_on_list_item_selected));
 			state_list->connect("item_activated", callable_mp(this, &HSMEditorView::_on_list_item_activated));
@@ -1520,8 +1734,10 @@ void HSMEditorView::_notification(int p_what) {
 			node_menu->connect("id_pressed", callable_mp(this, &HSMEditorView::_on_node_menu_pressed));
 			transition_menu->connect("id_pressed", callable_mp(this, &HSMEditorView::_on_transition_menu_pressed));
 			line_menu->connect("id_pressed", callable_mp(this, &HSMEditorView::_on_line_menu_pressed));
-			add_btn->connect("pressed", callable_mp(this, &HSMEditorView::_on_add_pressed));
-			del_btn->connect("pressed", callable_mp(this, &HSMEditorView::_on_delete_pressed));
+			tree_open_btn->connect("pressed", callable_mp(this, &HSMEditorView::_on_open_tree_pressed));
+		} break;
+		case NOTIFICATION_THEME_CHANGED: {
+			tree_open_btn->set_button_icon(get_theme_icon(LW_NAME(ExternalLink), LW_NAME(EditorIcons)));
 		} break;
 	}
 }
@@ -1532,6 +1748,9 @@ void HSMEditorView::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("_restore_root", "target", "root"), &HSMEditorView::_restore_root);
 
 	ADD_SIGNAL(MethodInfo("hsm_edited"));
+	// Which state the picture is on. The main screen answers it with the tree pane below;
+	// the debugger answers it with a running tree, and neither answer belongs in here.
+	ADD_SIGNAL(MethodInfo("state_picked", PropertyInfo(Variant::OBJECT, "state", PROPERTY_HINT_RESOURCE_TYPE, "HSMStateSpec")));
 }
 
 HSMEditorView::HSMEditorView() {
@@ -1546,18 +1765,6 @@ HSMEditorView::HSMEditorView() {
 	list_title->set_text(TTR("States"));
 	list_box->add_child(list_title);
 
-	toolbar = memnew(HBoxContainer);
-	list_box->add_child(toolbar);
-
-	add_btn = memnew(Button);
-	add_btn->set_text(TTR("Add State"));
-	add_btn->set_tooltip_text(TTR("Adds a child to the selected state, which is what makes it a machine."));
-	toolbar->add_child(add_btn);
-
-	del_btn = memnew(Button);
-	del_btn->set_text(TTR("Remove"));
-	toolbar->add_child(del_btn);
-
 	state_list = memnew(Tree);
 	state_list->set_h_size_flags(SIZE_EXPAND_FILL);
 	state_list->set_v_size_flags(SIZE_EXPAND_FILL);
@@ -1565,11 +1772,48 @@ HSMEditorView::HSMEditorView() {
 	state_list->set_columns(1);
 	list_box->add_child(state_list);
 
+	right_split = memnew(HSplitContainer);
+	right_split->set_h_size_flags(SIZE_EXPAND_FILL);
+	right_split->set_v_size_flags(SIZE_EXPAND_FILL);
+	right_split->set_focus_mode(FOCUS_NONE);
+	add_child(right_split);
+
 	graph = memnew(HSMGraphEdit);
 	graph->set_h_size_flags(SIZE_EXPAND_FILL);
 	graph->set_v_size_flags(SIZE_EXPAND_FILL);
 	graph->set_show_arrange_button(false);
-	add_child(graph);
+	right_split->add_child(graph);
+
+	// Down until a state that holds a tree is picked. A hidden child leaves the split with
+	// one, which is the whole of "the graph gets the room back".
+	tree_box = memnew(VBoxContainer);
+	tree_box->set_custom_minimum_size(Size2(280, 0) * EDSCALE);
+	tree_box->hide();
+	right_split->add_child(tree_box);
+
+	HBoxContainer *tree_header = memnew(HBoxContainer);
+	tree_box->add_child(tree_header);
+
+	tree_title = memnew(Label);
+	tree_title->set_h_size_flags(SIZE_EXPAND_FILL);
+	// Clipped rather than allowed to set the width: a Label asks for room enough for all of
+	// its text, and a long path would push the pane wider than it was dragged to.
+	tree_title->set_clip_text(true);
+	tree_title->set_theme_type_variation("HeaderSmall");
+	tree_header->add_child(tree_title);
+
+	tree_open_btn = memnew(Button);
+	tree_open_btn->set_flat(true);
+	tree_open_btn->set_tooltip_text(TTR("Open this behavior tree in its own tab."));
+	tree_header->add_child(tree_open_btn);
+
+	tree_view = memnew(TaskTree);
+	tree_view->set_h_size_flags(SIZE_EXPAND_FILL);
+	tree_view->set_v_size_flags(SIZE_EXPAND_FILL);
+	// Shown, not edited. Nothing here is wired to the task editor's actions either, so the
+	// only gesture this tree answers is picking a row open or shut.
+	tree_view->set_editable(false);
+	tree_box->add_child(tree_view);
 
 	// One texture for the whole view rather than one per node: it is the same blank, and a
 	// refresh makes a dozen nodes.

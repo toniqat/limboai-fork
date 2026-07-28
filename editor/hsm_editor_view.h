@@ -17,6 +17,7 @@
 #include "../hsm/hsm_resource.h"
 #include "hsm_graph_edit.h"
 #include "hsm_nest_node.h"
+#include "task_tree.h"
 
 #ifdef LIMBOAI_MODULE
 #include "core/input/input_event.h"
@@ -106,11 +107,24 @@ private:
 
 	VBoxContainer *list_box;
 	Label *list_title;
-	HBoxContainer *toolbar;
-	Button *add_btn;
-	Button *del_btn;
+	// No toolbar of its own: what could stand here -- add a state, add a machine, remove one --
+	// is on the main screen's toolbar, which is the one place that already knows whether the
+	// open document is a machine at all. Two rows of the same three buttons a finger apart is
+	// two places to keep right.
 	Tree *state_list;
+	// The graph and the tree preview share the right half. Two panes rather than one that
+	// swaps: the tree a state holds is a thing standing *inside* that state, and a picture
+	// that took the graph's place would hide where it sits.
+	HSplitContainer *right_split;
 	HSMGraphEdit *graph;
+	// The tree the picked state holds. Read-only -- see TaskTree::set_editable().
+	VBoxContainer *tree_box;
+	Label *tree_title;
+	Button *tree_open_btn;
+	TaskTree *tree_view;
+	// What the preview is showing, which is also what the title's button opens. Kept because
+	// the button outlives the click that filled the pane.
+	Ref<BehaviorTree> previewed_tree;
 	PopupMenu *node_menu;
 	PopupMenu *transition_menu;
 	// A right-click that landed on an edge rather than on a node. It is its own menu because
@@ -149,6 +163,27 @@ private:
 	// While the view is the one moving nodes. A nest hands a drag down to what it holds,
 	// and a fit moves the nest itself -- without this the second would read as the first.
 	bool adjusting = false;
+
+	// ── Watching one that runs ──
+	// The debugger draws with this same view. A machine on disk and the same machine on the
+	// map have to be one picture, or reading the second is a thing to learn twice -- and the
+	// only screen that can answer "where is it right now" is the one the game is feeding.
+	// What is given up for it is every gesture that writes.
+	bool read_only = false;
+	// The title each node was built with. The mark on the active leaf is put on and taken
+	// off far more often than the graph is rebuilt, and a title with a mark already on it is
+	// not something to append a second one to.
+	HashMap<StringName, String> base_titles;
+	// An edge that was taken lately, and how much of the glow is left. It fades on its own
+	// rather than being switched off by the next one: two states swapping back and forth is
+	// the commonest picture a machine makes, and one line switching on and off reads as a
+	// fault rather than as movement.
+	struct Pulse {
+		StringName from;
+		StringName to;
+		float amount = 0.0;
+	};
+	Vector<Pulse> pulses;
 
 	static StringName _node_name_for(const Ref<HSMStateSpec> &p_state);
 	static StringName _anystate_node_name_for(const Ref<HSMStateSpec> &p_machine);
@@ -189,6 +224,11 @@ private:
 	void _on_graph_end_node_move();
 
 	void _drill_into(const Ref<HSMStateSpec> &p_state);
+	// Fills the right pane with the tree `p_state` holds, or hides the pane when it holds
+	// none. Showing a tree is not opening it: this one never takes the screen away from the
+	// machine, and the button in its title is the only thing here that leaves.
+	void _preview_tree(const Ref<HSMStateSpec> &p_state);
+	void _on_open_tree_pressed();
 	void _inspect(const Ref<HSMStateSpec> &p_drawn);
 
 	Ref<HSMStateSpec> _selected_spec() const;
@@ -201,7 +241,10 @@ private:
 	void _detach_state(const Ref<HSMStateSpec> &p_machine, const Ref<HSMStateSpec> &p_state);
 
 	bool _remove_drawn(const Ref<HSMStateSpec> &p_drawn);
-	void _add_child_state(const Ref<HSMStateSpec> &p_drawn_parent);
+	// `p_as_machine` gives the new state a child of its own. A state with children *is* a
+	// machine -- there is no separate type and no flag -- so the two buttons differ by that
+	// one child and nothing else.
+	void _add_child_state(const Ref<HSMStateSpec> &p_drawn_parent, bool p_as_machine = false);
 	// The row in *this* file that a drawn row stands for, or nothing when it came from the
 	// base. Matched on the event too: which of two rows between the same pair this is, is
 	// the one thing a pair of endpoints cannot say.
@@ -230,9 +273,9 @@ private:
 	void _begin_connect_from(const StringName &p_name);
 	void _on_connect_to_requested(const StringName &p_from, const StringName &p_to);
 
-	void _on_add_pressed();
-	void _on_delete_pressed();
 	void _on_delete_nodes_request(const TypedArray<StringName> &p_nodes);
+
+	void _fade_pulses(double p_delta);
 
 protected:
 	static void _bind_methods();
@@ -242,6 +285,28 @@ public:
 	void edit_hsm(const Ref<HierarchicalStateMachine> &p_hsm);
 	Ref<HierarchicalStateMachine> get_edited_hsm() const { return hsm; }
 	void refresh();
+
+	// What the main toolbar drives when a machine is the open document. Each acts on the
+	// picked state, and adding falls back to the root -- a machine always has one, so the
+	// button never has nothing to act on.
+	void add_state();
+	void add_machine();
+	void remove_selected();
+
+	// Turns off everything that writes: the menus, the connect gesture, the delete request,
+	// the Inspector, and the remembering of where a node was dragged to. What is left is
+	// exactly the picture and the picking. Set once, by whoever built the view.
+	void set_read_only(bool p_read_only);
+	bool is_read_only() const { return read_only; }
+
+	// Where the machine is standing, outermost first. Everything off the chain is dimmed:
+	// the question a running machine is being asked is "where is it", and one lit line
+	// answers it better than a dozen equally bright boxes. An empty chain lights all of them
+	// again, which is what "it is not running" looks like.
+	void set_active_chain(const Vector<Ref<HSMStateSpec>> &p_chain);
+	// One edge, just taken. Both ends may be missing (an entry into a machine has no state
+	// it came from), and then nothing glows.
+	void pulse_transition(const Ref<HSMStateSpec> &p_from, const Ref<HSMStateSpec> &p_to);
 
 	HSMEditorView();
 	~HSMEditorView();

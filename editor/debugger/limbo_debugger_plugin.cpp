@@ -40,9 +40,131 @@
 
 //**** LimboDebuggerTab
 
+namespace {
+
+// Rebuilds the machine the game reported into the resource the main screen edits, so that the
+// same view can draw it. It is not the file the machine was built from: what is drawn has to
+// be what is running, and a file may have been edited since the game was launched -- worse, a
+// machine put together in code has no file at all.
+Ref<HierarchicalStateMachine> _machine_from_report(const String &p_root_name, const Array &p_states, const Array &p_transitions,
+		HashMap<String, Ref<HSMStateSpec>> &r_by_path, HashMap<uint64_t, String> &r_path_by_state) {
+	Ref<HierarchicalStateMachine> machine;
+	machine.instantiate();
+	Ref<HSMStateSpec> root;
+	root.instantiate();
+	root->set_state_name(StringName(p_root_name));
+	machine->set_root(root);
+
+	r_by_path.clear();
+	r_path_by_state.clear();
+	// The root is the empty path: every state's path is written down from it, so the machine
+	// itself is the one with nothing to say.
+	r_by_path[String()] = root;
+	r_path_by_state[root->get_instance_id()] = String();
+
+	HashMap<String, String> parent_of;
+
+	for (int i = 0; i < p_states.size(); i++) {
+		Dictionary state = p_states[i];
+		String path = state.get("path", String());
+		if (path.is_empty()) {
+			continue;
+		}
+		Ref<HSMStateSpec> spec;
+		spec.instantiate();
+		spec->set_state_name(StringName(state.get("name", path)));
+		if (state.has("bt")) {
+			String bt_path = state["bt"];
+			Ref<BehaviorTree> tree = bt_path.is_empty() ? Ref<BehaviorTree>() : RESOURCE_LOAD(bt_path, "BehaviorTree");
+			if (tree.is_null()) {
+				// A tree built into the scene it runs in has no file to load, and one whose
+				// file has since moved has none either. An empty stand-in still answers the
+				// only question the picture asks a tree: whether there is one.
+				tree.instantiate();
+			}
+			spec->set_behavior_tree(tree);
+		}
+		r_by_path[path] = spec;
+		r_path_by_state[spec->get_instance_id()] = path;
+		parent_of[path] = state.get("parent", String());
+	}
+
+	// Hung on their parents in the order they were reported, which is the order the machine
+	// holds them in -- and that order is what the fallback layout puts them in rows by.
+	for (int i = 0; i < p_states.size(); i++) {
+		Dictionary state = p_states[i];
+		String path = state.get("path", String());
+		Ref<HSMStateSpec> spec = r_by_path.has(path) ? r_by_path[path] : Ref<HSMStateSpec>();
+		if (spec.is_null()) {
+			continue;
+		}
+		String parent_path = parent_of.has(path) ? parent_of[path] : String();
+		Ref<HSMStateSpec> parent = r_by_path.has(parent_path) ? r_by_path[parent_path] : root;
+		TypedArray<HSMStateSpec> children = parent->get_children();
+		children.append(spec);
+		parent->set_children(children);
+		if (bool(state.get("initial", false))) {
+			parent->set_initial_child(spec);
+		}
+	}
+
+	for (int i = 0; i < p_transitions.size(); i++) {
+		Array row = p_transitions[i];
+		if (row.size() < 3) {
+			continue;
+		}
+		String from_path = row[0];
+		String to_path = row[1];
+		if (!r_by_path.has(to_path)) {
+			continue;
+		}
+		Ref<HSMStateSpec> to = r_by_path[to_path];
+		// An empty `from` is ANYSTATE, which the picture puts a node of its own in for.
+		Ref<HSMStateSpec> from;
+		if (!from_path.is_empty()) {
+			if (!r_by_path.has(from_path)) {
+				continue;
+			}
+			from = r_by_path[from_path];
+		}
+		// Which machine owns the row is not reported and does not need to be: both ends of a
+		// transition are children of it, so the destination's parent is the answer.
+		String owner_path = parent_of.has(to_path) ? parent_of[to_path] : String();
+		Ref<HSMStateSpec> owner = r_by_path.has(owner_path) ? r_by_path[owner_path] : root;
+
+		Ref<HSMTransition> transition;
+		transition.instantiate();
+		transition->set_from(from);
+		transition->set_to(to);
+		transition->set_event(StringName(row[2]));
+		TypedArray<HSMTransition> rows = owner->get_transitions();
+		rows.append(transition);
+		owner->set_transitions(rows);
+	}
+
+	return machine;
+}
+
+// What a path is called: its last name. The path itself is the tooltip -- it is what tells
+// two of a kind apart, and it is also far too long to read at a glance in a list.
+String _leaf_of(const String &p_path) {
+	String leaf = p_path.get_file();
+	return leaf.is_empty() ? p_path : leaf;
+}
+
+} // namespace
+
+struct LimboDebuggerTab::AgentRowSorter {
+	bool operator()(const LimboDebuggerTab::AgentRow &p_a, const LimboDebuggerTab::AgentRow &p_b) const {
+		return p_a.agent_path < p_b.agent_path;
+	}
+};
+
 void LimboDebuggerTab::_reset_controls() {
-	bt_instance_list->clear();
+	agent_list->clear();
 	bt_view->clear();
+	history->clear();
+	_clear_machine();
 	alert_box->hide();
 	info_message->set_text(TTR("Run project to start debugging."));
 	info_message->show();
@@ -51,34 +173,48 @@ void LimboDebuggerTab::_reset_controls() {
 }
 
 void LimboDebuggerTab::start_session() {
-	bt_instance_list->clear();
+	agent_list->clear();
 	bt_view->clear();
+	history->clear();
+	_clear_machine();
 	alert_box->hide();
-	info_message->set_text(TTR("Pick a player from the list to display behavior tree."));
+	info_message->set_text(TTR("Pick a character from the list to display its state machine."));
 	info_message->show();
 	session->send_message("limboai:start_session", Array());
 }
 
 void LimboDebuggerTab::stop_session() {
+	active_bt_instances.clear();
+	active_hsms.clear();
+	agent_rows.clear();
+	selected_agent = String();
+	shown_hsm_id = 0;
+	tracked_bt_id = 0;
+	bt_pinned = false;
 	_reset_controls();
 	session->send_message("limboai:stop_session", Array());
 }
 
 void LimboDebuggerTab::update_active_bt_instances(const Array &p_data) {
 	active_bt_instances.clear();
-	for (int i = 0; i < p_data.size(); i += 2) {
-		BTInstanceInfo info{ p_data[i], p_data[i + 1] };
-
+	for (int i = 0; i + 2 < p_data.size(); i += 3) {
+		BTInstanceInfo info{ p_data[i], p_data[i + 1], p_data[i + 2] };
 		active_bt_instances.push_back(info);
 	}
-	_update_bt_instance_list(active_bt_instances, filter_players->get_text());
+	_rebuild_agent_rows();
+}
+
+void LimboDebuggerTab::update_active_hsms(const Array &p_data) {
+	active_hsms.clear();
+	for (int i = 0; i + 2 < p_data.size(); i += 3) {
+		HSMInfo info{ p_data[i], p_data[i + 1], p_data[i + 2] };
+		active_hsms.push_back(info);
+	}
+	_rebuild_agent_rows();
 }
 
 uint64_t LimboDebuggerTab::get_selected_bt_instance_id() {
-	if (!bt_instance_list->is_anything_selected()) {
-		return 0;
-	}
-	return bt_instance_list->get_item_metadata(bt_instance_list->get_selected_items()[0]);
+	return tracked_bt_id;
 }
 
 void LimboDebuggerTab::update_behavior_tree(const Ref<BehaviorTreeData> &p_data) {
@@ -93,59 +229,299 @@ void LimboDebuggerTab::_show_alert(const String &p_message) {
 	alert_box->set_visible(!p_message.is_empty());
 }
 
-void LimboDebuggerTab::_update_bt_instance_list(const Vector<BTInstanceInfo> &p_instances, const String &p_filter) {
-	// Remember selected item.
-	uint64_t selected_instance_id = 0;
-	if (bt_instance_list->is_anything_selected()) {
-		selected_instance_id = uint64_t(bt_instance_list->get_item_metadata(bt_instance_list->get_selected_items()[0]));
-	}
+// -- The characters --------------------------------------------------------
 
-	bt_instance_list->clear();
-	int select_idx = -1;
-	bool selection_filtered_out = false;
-	String filter = p_filter.to_lower();
-	for (const BTInstanceInfo &info : p_instances) {
-		if (filter.is_empty() || info.owner_node_path.to_lower().contains(filter)) {
-			int idx = bt_instance_list->add_item(info.owner_node_path);
-			bt_instance_list->set_item_metadata(idx, info.instance_id);
-			// Make item text shortened from the left, e.g ".../Agent/BTPlayer".
-			bt_instance_list->set_item_text_direction(idx, TEXT_DIRECTION_RTL);
-			if (info.instance_id == selected_instance_id) {
-				select_idx = idx;
-			}
-		} else if (info.instance_id == selected_instance_id) {
-			selection_filtered_out = true;
+void LimboDebuggerTab::_rebuild_agent_rows() {
+	agent_rows.clear();
+	HashMap<String, int> index_of;
+
+	for (const HSMInfo &info : active_hsms) {
+		String key = info.agent_path.is_empty() ? info.node_path : info.agent_path;
+		if (!index_of.has(key)) {
+			AgentRow row;
+			row.agent_path = key;
+			index_of[key] = agent_rows.size();
+			agent_rows.push_back(row);
 		}
+		AgentRow &row = agent_rows.write[index_of[key]];
+		row.hsm_id = info.hsm_id;
+		row.hsm_node_path = info.node_path;
 	}
 
-	// Restore selected item.
-	if (select_idx > -1) {
-		bt_instance_list->select(select_idx);
-	} else if (selected_instance_id != 0) {
-		if (selection_filtered_out) {
-			session->send_message("limboai:untrack_bt_player", Array());
-			bt_view->clear();
-			_show_alert("");
+	for (const BTInstanceInfo &info : active_bt_instances) {
+		// A tree with no agent still gets a row, under the node that owns it: a list that
+		// silently drops one is worse than a row with an awkward name on it.
+		String key = info.agent_path.is_empty() ? info.owner_node_path : info.agent_path;
+		if (!index_of.has(key)) {
+			AgentRow row;
+			row.agent_path = key;
+			index_of[key] = agent_rows.size();
+			agent_rows.push_back(row);
+		}
+		agent_rows.write[index_of[key]].bt_instances.push_back(info.instance_id);
+	}
+
+	// By path, which is unique and does not move. The numbering below counts along this
+	// order, and an order that reshuffled would renumber the characters while being read.
+	agent_rows.sort_custom<AgentRowSorter>();
+
+	HashMap<String, int> total;
+	for (const AgentRow &row : agent_rows) {
+		String leaf = _leaf_of(row.agent_path);
+		total[leaf] = total.has(leaf) ? total[leaf] + 1 : 1;
+	}
+	HashMap<String, int> seen;
+	for (int i = 0; i < agent_rows.size(); i++) {
+		String leaf = _leaf_of(agent_rows[i].agent_path);
+		if (total[leaf] > 1) {
+			// Every one of them is numbered, not all but the first: a lone "Ogre" standing
+			// above "Ogre (2)" reads as the odd one out rather than as the first of three.
+			seen[leaf] = seen.has(leaf) ? seen[leaf] + 1 : 1;
+			agent_rows.write[i].label = leaf + vformat(" (%d)", seen[leaf]);
 		} else {
-			_show_alert(TTR("Behavior tree instance is no longer present."));
+			agent_rows.write[i].label = leaf;
 		}
+	}
+
+	_update_agent_list(filter_players->get_text());
+
+	// A tree that has only just been built may belong to the state being stood in. Nothing
+	// else would fetch it: a machine that has not moved sends nothing.
+	if (shown_hsm_id != 0) {
+		_choose_tree();
 	}
 }
 
-void LimboDebuggerTab::_bt_instance_selected(int p_idx) {
+void LimboDebuggerTab::_update_agent_list(const String &p_filter) {
+	agent_list->clear();
+	String filter = p_filter.to_lower();
+	int select_idx = -1;
+	bool selection_filtered_out = false;
+	for (const AgentRow &row : agent_rows) {
+		if (!filter.is_empty() && !row.label.to_lower().contains(filter) && !row.agent_path.to_lower().contains(filter)) {
+			if (row.agent_path == selected_agent) {
+				selection_filtered_out = true;
+			}
+			continue;
+		}
+		int idx = agent_list->add_item(row.label);
+		agent_list->set_item_metadata(idx, row.agent_path);
+		// The name is what is read; the path is what tells two of the same name apart.
+		agent_list->set_item_tooltip(idx, row.agent_path);
+		if (row.agent_path == selected_agent) {
+			select_idx = idx;
+		}
+	}
+
+	if (select_idx > -1) {
+		agent_list->select(select_idx);
+		_show_alert("");
+	} else if (!selected_agent.is_empty()) {
+		_show_alert(selection_filtered_out ? String() : TTR("The selected character is no longer present."));
+		_track_hsm(0);
+		_track_bt(0);
+	}
+}
+
+const LimboDebuggerTab::AgentRow *LimboDebuggerTab::_row_for(const String &p_agent_path) const {
+	for (const AgentRow &row : agent_rows) {
+		if (row.agent_path == p_agent_path) {
+			return &row;
+		}
+	}
+	return nullptr;
+}
+
+void LimboDebuggerTab::_agent_selected(int p_idx) {
+	selected_agent = agent_list->get_item_metadata(p_idx);
 	alert_box->hide();
+	// A fresh pick answers "which tree" from scratch: whatever was up belonged to whoever
+	// was being read before.
+	bt_pinned = false;
+	history->clear();
+
+	const AgentRow *row = _row_for(selected_agent);
+	if (row == nullptr) {
+		_track_hsm(0);
+		_track_bt(0);
+		return;
+	}
+	_track_hsm(row->hsm_id);
+	if (row->hsm_id == 0) {
+		// Nothing will arrive to choose from, so the character's own tree is the answer now.
+		_choose_tree();
+	}
+}
+
+void LimboDebuggerTab::_filter_changed(String p_text) {
+	_update_agent_list(p_text);
+}
+
+// -- The machine -----------------------------------------------------------
+
+void LimboDebuggerTab::_clear_machine() {
+	live_machine.unref();
+	state_by_path.clear();
+	path_by_state.clear();
+	active_chain = PackedStringArray();
+	hsm_view->edit_hsm(Ref<HierarchicalStateMachine>());
+}
+
+void LimboDebuggerTab::_track_hsm(uint64_t p_hsm_id) {
+	if (p_hsm_id == shown_hsm_id) {
+		return;
+	}
+	shown_hsm_id = p_hsm_id;
+	_clear_machine();
+	if (p_hsm_id == 0) {
+		session->send_message("limboai:untrack_hsm", Array());
+		return;
+	}
+	Array data;
+	data.push_back(p_hsm_id);
+	session->send_message("limboai:track_hsm", data);
+}
+
+void LimboDebuggerTab::update_hsm_structure(const Array &p_data) {
+	if (p_data.size() < 4 || uint64_t(p_data[0]) != shown_hsm_id) {
+		return;
+	}
+	const AgentRow *row = _row_for(selected_agent);
+	String root_name = row != nullptr ? _leaf_of(row->hsm_node_path) : String("HSM");
+
+	live_machine = _machine_from_report(root_name, p_data[1], p_data[2], state_by_path, path_by_state);
+	hsm_view->edit_hsm(live_machine);
+	_apply_chain(p_data[3]);
+	// Which tree is up is settled by this, message and all -- there is nothing left here to
+	// hide or show once it has run.
+	_choose_tree();
+}
+
+void LimboDebuggerTab::update_hsm_state(const Array &p_data) {
+	if (p_data.size() < 4 || uint64_t(p_data[0]) != shown_hsm_id || live_machine.is_null()) {
+		return;
+	}
+	String from = p_data[1];
+	String to = p_data[2];
+
+	// One line per transition, newest first. The graph draws a pair that goes both ways as
+	// one line with a head at either end, so which of the two directions was just taken is
+	// something only this list can say.
+	history->add_item(vformat(String::utf8("%s  →  %s"),
+			from.is_empty() ? TTR("(entered)") : _leaf_of(from), _leaf_of(to)));
+	history->move_item(history->get_item_count() - 1, 0);
+	if (history->get_item_count() > 200) {
+		history->remove_item(history->get_item_count() - 1);
+	}
+
+	hsm_view->pulse_transition(
+			state_by_path.has(from) ? state_by_path[from] : Ref<HSMStateSpec>(),
+			state_by_path.has(to) ? state_by_path[to] : Ref<HSMStateSpec>());
+	_apply_chain(p_data[3]);
+	_choose_tree();
+}
+
+void LimboDebuggerTab::_apply_chain(const PackedStringArray &p_chain) {
+	active_chain = p_chain;
+	Vector<Ref<HSMStateSpec>> specs;
+	for (int i = 0; i < p_chain.size(); i++) {
+		if (state_by_path.has(p_chain[i])) {
+			specs.push_back(state_by_path[p_chain[i]]);
+		}
+	}
+	hsm_view->set_active_chain(specs);
+}
+
+// -- The tree --------------------------------------------------------------
+
+uint64_t LimboDebuggerTab::_bt_instance_for_state(const String &p_state_path) const {
+	const AgentRow *row = _row_for(selected_agent);
+	if (row == nullptr || row->hsm_node_path.is_empty() || p_state_path.is_empty()) {
+		return 0;
+	}
+	// The state's own node path: where the machine stands, plus where the state stands under
+	// it. A tree instance is registered under the node that owns it, and for a BTState that
+	// is the state itself -- so the two strings meet without either side having to guess.
+	String full = row->hsm_node_path + String("/") + p_state_path;
+	for (const BTInstanceInfo &info : active_bt_instances) {
+		if (info.owner_node_path == full) {
+			return info.instance_id;
+		}
+	}
+	return 0;
+}
+
+void LimboDebuggerTab::_choose_tree() {
+	if (bt_pinned) {
+		return;
+	}
+	uint64_t id = 0;
+	// Innermost first: the leaf is the state actually being turned, and a machine further
+	// out is only the room it stands in.
+	for (int i = active_chain.size() - 1; i >= 0 && id == 0; i--) {
+		id = _bt_instance_for_state(active_chain[i]);
+	}
+	if (id == 0) {
+		const AgentRow *row = _row_for(selected_agent);
+		if (row != nullptr && !row->bt_instances.is_empty()) {
+			id = row->bt_instances[0];
+		}
+	}
+	_track_bt(id);
+}
+
+void LimboDebuggerTab::_track_bt(uint64_t p_instance_id) {
+	if (p_instance_id == 0 && tracked_bt_id == 0) {
+		// Nothing before and nothing now -- but what "nothing" stands for may have changed:
+		// a character has just been picked whose machine holds no tree anywhere.
+		info_message->set_text(TTR("No behavior tree to show."));
+		info_message->show();
+		return;
+	}
+	if (p_instance_id == tracked_bt_id) {
+		return;
+	}
+	tracked_bt_id = p_instance_id;
 	bt_view->clear();
+	if (p_instance_id == 0) {
+		session->send_message("limboai:untrack_bt_player", Array());
+		resource_header->set_text(TTR("Inactive"));
+		resource_header->set_disabled(true);
+		// Said rather than left blank: an empty pane beside a machine that is plainly moving
+		// reads as something that failed, and most states hold no tree at all.
+		info_message->set_text(TTR("No behavior tree to show."));
+		info_message->show();
+		return;
+	}
 	info_message->set_text(TTR("Waiting for behavior tree update."));
 	info_message->show();
 	resource_header->set_text(TTR("Waiting for data"));
 	resource_header->set_disabled(true);
-	Array msg_data;
-	msg_data.push_back(bt_instance_list->get_item_metadata(p_idx));
-	session->send_message("limboai:track_bt_player", msg_data);
+	Array data;
+	data.push_back(p_instance_id);
+	session->send_message("limboai:track_bt_player", data);
 }
 
-void LimboDebuggerTab::_filter_changed(String p_text) {
-	_update_bt_instance_list(active_bt_instances, p_text);
+void LimboDebuggerTab::_on_state_picked(const Ref<HSMStateSpec> &p_state) {
+	if (p_state.is_null()) {
+		// Nothing is picked, which is what clearing the view says on its way out. It is not
+		// a request to change which tree is up.
+		return;
+	}
+	const String *path = path_by_state.getptr(p_state->get_instance_id());
+	if (path == nullptr) {
+		return;
+	}
+	uint64_t id = _bt_instance_for_state(*path);
+	if (id != 0) {
+		// Asked for by hand, so it stays up until another is asked for -- otherwise the next
+		// transition would take the pane away mid-read.
+		bt_pinned = true;
+		_track_bt(id);
+		return;
+	}
+	bt_pinned = false;
+	_choose_tree();
 }
 
 void LimboDebuggerTab::_window_visibility_changed(bool p_visible) {
@@ -172,7 +548,8 @@ void LimboDebuggerTab::_notification(int p_what) {
 		case NOTIFICATION_READY: {
 			resource_header->connect(LW_NAME(pressed), callable_mp(this, &LimboDebuggerTab::_resource_header_pressed));
 			filter_players->connect(LW_NAME(text_changed), callable_mp(this, &LimboDebuggerTab::_filter_changed));
-			bt_instance_list->connect(LW_NAME(item_selected), callable_mp(this, &LimboDebuggerTab::_bt_instance_selected));
+			agent_list->connect(LW_NAME(item_selected), callable_mp(this, &LimboDebuggerTab::_agent_selected));
+			hsm_view->connect("state_picked", callable_mp(this, &LimboDebuggerTab::_on_state_picked));
 			update_interval->connect("value_changed", callable_mp(bt_view, &BehaviorTreeView::set_update_interval_msec));
 
 			Ref<ConfigFile> cf;
@@ -214,6 +591,10 @@ void LimboDebuggerTab::setup(Ref<EditorDebuggerSession> p_session, CompatWindowW
 	_reset_controls();
 }
 
+// Four panes, left to right: who, what states it has, how they join, and what the one it is
+// standing in is doing. They stand together because reading a character means reading all
+// four at once -- with the machine in one tab and its tree in another, the thing joining
+// "which state is it in" to "which branch is it turning" is the reader's own memory.
 LimboDebuggerTab::LimboDebuggerTab() {
 	root_vb = memnew(VBoxContainer);
 	add_child(root_vb);
@@ -255,17 +636,41 @@ LimboDebuggerTab::LimboDebuggerTab() {
 	hsc->add_child(list_box);
 
 	filter_players = memnew(LineEdit);
-	filter_players->set_placeholder(TTR("Filter Players"));
+	filter_players->set_placeholder(TTR("Filter Characters"));
 	list_box->add_child(filter_players);
 
-	bt_instance_list = memnew(ItemList);
-	bt_instance_list->set_custom_minimum_size(Size2(240.0 * EDSCALE, 0.0));
-	bt_instance_list->set_h_size_flags(SIZE_FILL);
-	bt_instance_list->set_v_size_flags(SIZE_EXPAND_FILL);
-	list_box->add_child(bt_instance_list);
+	agent_list = memnew(ItemList);
+	agent_list->set_custom_minimum_size(Size2(160.0 * EDSCALE, 0.0));
+	agent_list->set_h_size_flags(SIZE_FILL);
+	agent_list->set_v_size_flags(SIZE_EXPAND_FILL);
+	list_box->add_child(agent_list);
+
+	HSplitContainer *right_split = memnew(HSplitContainer);
+	right_split->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	right_split->set_v_size_flags(Control::SIZE_EXPAND_FILL);
+	hsc->add_child(right_split);
+
+	// The machine and what it has been doing, one above the other. The history is a strip
+	// rather than a pane of its own -- it is a handful of words per line -- and the split is
+	// there so it can be pushed out of the way entirely when the graph is what matters.
+	machine_split = memnew(VSplitContainer);
+	machine_split->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	machine_split->set_v_size_flags(Control::SIZE_EXPAND_FILL);
+	right_split->add_child(machine_split);
+
+	hsm_view = memnew(HSMEditorView);
+	// Nothing here writes. These states stand for nodes in a running game, and there is no
+	// file behind them for an edit to land in.
+	hsm_view->set_read_only(true);
+	machine_split->add_child(hsm_view);
+
+	history = memnew(ItemList);
+	history->set_custom_minimum_size(Size2(0, 60 * EDSCALE));
+	machine_split->add_child(history);
 
 	view_box = memnew(VBoxContainer);
-	hsc->add_child(view_box);
+	view_box->set_custom_minimum_size(Size2(240.0 * EDSCALE, 0.0));
+	right_split->add_child(view_box);
 
 	bt_view = memnew(BehaviorTreeView);
 	bt_view->set_h_size_flags(Control::SIZE_EXPAND_FILL);
@@ -340,6 +745,12 @@ bool LimboDebuggerPlugin::_capture(const String &p_message, const Array &p_data,
 	bool captured = true;
 	if (p_message == "limboai:active_bt_players") {
 		tab->update_active_bt_instances(p_data);
+	} else if (p_message == "limboai:active_hsms") {
+		tab->update_active_hsms(p_data);
+	} else if (p_message == "limboai:hsm_structure") {
+		tab->update_hsm_structure(p_data);
+	} else if (p_message == "limboai:hsm_state") {
+		tab->update_hsm_state(p_data);
 	} else if (p_message == "limboai:bt_update") {
 		Ref<BehaviorTreeData> data = BehaviorTreeData::deserialize(p_data);
 		if (data->bt_instance_id == tab->get_selected_bt_instance_id()) {

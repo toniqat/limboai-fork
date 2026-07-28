@@ -114,6 +114,16 @@ private:
 		LAYOUT_WIDESCREEN_OPTIMIZED,
 	};
 
+	// Which document the toolbar is a toolbar for. Nearly every button on it belongs to one
+	// kind or the other -- the favorite tasks build a tree, "Add State" builds a machine --
+	// and with nothing open neither set means anything. The tab's type is what decides, which
+	// is the same thing that decides which half of the screen stands.
+	enum ToolbarMode {
+		TOOLBAR_NONE,
+		TOOLBAR_BT,
+		TOOLBAR_HSM,
+	};
+
 	struct ThemeCache {
 		Ref<Texture2D> duplicate_task_icon;
 		Ref<Texture2D> edit_script_icon;
@@ -140,6 +150,7 @@ private:
 
 	EditorPlugin *plugin;
 	EditorLayout editor_layout;
+	ToolbarMode toolbar_mode = TOOLBAR_NONE;
 	// Tabs hold either a BehaviorTree or a HierarchicalStateMachine: the tab bar is the
 	// one place where "which document am I on" lives, and splitting it per type would
 	// make drilling from a state into its tree cross two tab bars.
@@ -161,6 +172,9 @@ private:
 	HSplitContainer *hsc;
 	HSMEditorView *hsm_view;
 	TaskTree *task_tree;
+	// Whatever has to be put away to put the task palette away. The palette itself in the
+	// classic layout; the column it sits in, heading and all, in the widescreen one.
+	Control *palette_holder;
 	VBoxContainer *banners;
 	Panel *usage_hint;
 	PopupMenu *menu;
@@ -179,11 +193,23 @@ private:
 	FileDialog *load_dialog;
 	FileDialog *extract_dialog;
 
+	// What a machine's toolbar carries where a tree's carries its favorite tasks. Held as one
+	// container so that showing or hiding the set is one call, the same as `fav_tasks_hbox`.
+	HBoxContainer *hsm_tools_hbox;
+	Button *hsm_add_state_btn;
+	Button *hsm_add_machine_btn;
+	Button *hsm_remove_btn;
+
 	Button *new_btn;
 	Button *load_btn;
 	Button *save_btn;
 	Button *new_script_btn;
 	MenuButton *misc_btn;
+	// Kept as Control rather than VSeparator only to spare the header an include: nothing
+	// here is done to them but set_visible(). Each stands to the left of a group, so it goes
+	// away with the group -- a separator with nothing on one side of it separates nothing.
+	Control *docs_sep;
+	Control *script_sep;
 
 	ConfirmationDialog *rename_dialog;
 	LineEdit *rename_edit;
@@ -208,15 +234,25 @@ private:
 	void _update_misc_menu();
 	void _update_banners();
 	void _new_bt();
+	void _new_hsm();
+	// Makes whatever the open tab is. The button is the same button either way -- "new" is
+	// one gesture, and which kind of document it makes is a thing the screen already says.
+	void _on_new_pressed();
 	void _save_resource(const Ref<Resource> &p_res, const String &p_path);
 	void _save_current_bt(const String &p_path);
-	void _load_bt(const String &p_path);
+	// Opens either kind. The file carries its own type, so asking the user to pick one in a
+	// filter would be asking about a fact already on disk.
+	void _load_resource(const String &p_path);
 	void _update_task_tree(const Ref<BehaviorTree> &p_bt, const Ref<BTTask> &p_specific_task = nullptr);
 	void _disable_editing();
 	void _set_as_dirty(const Ref<Resource> &p_res, bool p_dirty);
 
 	// Which half of the screen is showing. The tab's type is the only thing that decides.
 	void _show_editor_for(const Ref<Resource> &p_res);
+	// And which buttons stand above it, on the same grounds. Called from the two places that
+	// settle what is open -- _show_editor_for() and _disable_editing() -- so the toolbar
+	// cannot disagree with the screen.
+	void _update_toolbar(ToolbarMode p_mode);
 	void _on_hsm_edited();
 	void _create_user_task_dir(String task_dir);
 	void _remove_task_from_favorite(const String &p_task);

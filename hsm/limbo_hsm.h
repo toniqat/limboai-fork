@@ -118,6 +118,15 @@ public:
 	void remove_transition(LimboState *p_from_state, const StringName &p_event);
 	bool has_transition(LimboState *p_from_state, const StringName &p_event) const { return transitions.has(Transition::make_key(p_from_state, p_event)); }
 
+#ifdef DEBUG_ENABLED
+	// Every transition this machine holds, as [from, to, event], where a nil `from` is
+	// ANYSTATE. The table is private because nothing in a running machine ever walks it --
+	// only the debugger does, and reading it straight is what spares the editor from having
+	// to infer an edge from the two states it happened to see on either side of one. Guards
+	// are left out: a Callable is not a thing a picture can show.
+	Array get_transition_rows() const;
+#endif // DEBUG_ENABLED
+
 	LimboState *anystate() const { return nullptr; }
 
 	LimboHSM();

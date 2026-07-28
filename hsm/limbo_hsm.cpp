@@ -12,7 +12,9 @@
 #include "limbo_hsm.h"
 
 #include "../bt/bt_state.h"
+#include "../compat/object.h"
 #include "../compat/variant.h"
+#include "../editor/debugger/limbo_debugger.h"
 
 #ifdef LIMBOAI_MODULE
 #include "core/config/engine.h"
@@ -202,12 +204,30 @@ void LimboHSM::set_active(bool p_active) {
 	} else {
 		_exit();
 	}
+
+#ifdef DEBUG_ENABLED
+	// Only a root machine is announced, and only while it is running. A nested one is not a
+	// second entry in the list -- it is part of the picture of the root, which is the thing
+	// the editor asks for by name.
+	if (LimboDebugger::get_singleton() != nullptr) {
+		if (active) {
+			LimboDebugger::get_singleton()->register_hsm(get_instance_id());
+		} else {
+			LimboDebugger::get_singleton()->unregister_hsm(get_instance_id());
+		}
+	}
+#endif // DEBUG_ENABLED
 }
 
 void LimboHSM::change_active_state(LimboState *p_state) {
 	ERR_FAIL_NULL(p_state);
 	ERR_FAIL_COND_MSG(!is_active(), "LimboHSM: Unable to change active state when HSM is not active.");
 	ERR_FAIL_COND_MSG(p_state->get_parent() != this, "LimboHSM: Unable to perform transition to a state that is not a child of this HSM.");
+
+	// What this machine was standing on a moment ago, which `previous_active` stops being the
+	// moment the machine is left and stepped into again -- it keeps its value while out. The
+	// debugger draws an edge out of it, and an edge is a thing that was actually taken.
+	LimboState *left = active_state;
 
 	if (active_state) {
 		active_state->_exit();
@@ -218,6 +238,16 @@ void LimboHSM::change_active_state(LimboState *p_state) {
 	active_state->_enter();
 
 	emit_signal(LW_NAME(active_state_changed), active_state, previous_active);
+
+#ifdef DEBUG_ENABLED
+	// Every machine tells, nested ones included, and all but the tracked root drop out on the
+	// debugger's first line. Hooking `active_state_changed` per machine instead would mean
+	// connecting and disconnecting as the tracked root changed -- and how a machine is nested
+	// is itself a thing that only exists while it runs.
+	if (LimboDebugger::get_singleton() != nullptr) {
+		LimboDebugger::get_singleton()->hsm_state_changed(this, left);
+	}
+#endif // DEBUG_ENABLED
 }
 
 void LimboHSM::_enter() {
@@ -282,6 +312,26 @@ void LimboHSM::remove_transition(LimboState *p_from_state, const StringName &p_e
 	ERR_FAIL_COND_MSG(!transitions.has(key), "LimboHSM: Unable to remove a transition that does not exist.");
 	transitions.erase(key);
 }
+
+#ifdef DEBUG_ENABLED
+Array LimboHSM::get_transition_rows() const {
+	Array rows;
+	for (const KeyValue<TransitionKey, Transition> &E : transitions) {
+		if (!E.value.is_valid()) {
+			continue;
+		}
+		Array row;
+		// Objects rather than paths: which node a state is, is a thing this side knows for
+		// certain, and where it stands relative to the root is a question only the root can
+		// answer -- and only the debugger has the root in hand.
+		row.push_back(E.value.from_state != ObjectID() ? Variant(OBJECT_DB_GET_INSTANCE(uint64_t(E.value.from_state))) : Variant());
+		row.push_back(OBJECT_DB_GET_INSTANCE(uint64_t(E.value.to_state)));
+		row.push_back(E.value.event);
+		rows.push_back(row);
+	}
+	return rows;
+}
+#endif // DEBUG_ENABLED
 
 void LimboHSM::_get_transition(LimboState *p_from_state, const StringName &p_event, Transition &r_transition) const {
 	ERR_FAIL_COND_MSG(p_from_state != nullptr && p_from_state->get_parent() != this, "LimboHSM: Unable to get a transition from a state that is not an immediate child of this HSM.");
@@ -443,8 +493,25 @@ void LimboHSM::_notification(int p_what) {
 				// Typically, this happens when the node is re-entered scene repeatedly (such as with object pooling).
 				set_active(true);
 			}
+#ifdef DEBUG_ENABLED
+			// A reparent takes the deferred road below, which leaves `active` standing -- so
+			// set_active() is never called on the way back in and the announcement above never
+			// happens. Announcing is idempotent, so saying it twice on the pooling road costs
+			// nothing; not saying it here loses the machine from the list for good.
+			if (is_root() && is_active() && LimboDebugger::get_singleton() != nullptr) {
+				LimboDebugger::get_singleton()->register_hsm(get_instance_id());
+			}
+#endif // DEBUG_ENABLED
 		} break;
 		case NOTIFICATION_EXIT_TREE: {
+#ifdef DEBUG_ENABLED
+			// Out of the tree is out of the list, whether it is a despawn or a reparent: what
+			// the list is for is picking a machine on the map, and one that is nowhere is not
+			// on it. The road back in is above.
+			if (is_root() && LimboDebugger::get_singleton() != nullptr) {
+				LimboDebugger::get_singleton()->unregister_hsm(get_instance_id());
+			}
+#endif // DEBUG_ENABLED
 			if (is_root()) {
 				// Exit the state machine if the root HSM is no longer in the scene tree (except when being reparented).
 				// This ensures that resources and signal connections are released if active.
