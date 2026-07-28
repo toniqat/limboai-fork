@@ -109,6 +109,10 @@ private:
 	// Set when a state was picked by hand, so that the machine moving on does not take the
 	// pane away from the tree that was being read.
 	bool bt_pinned = false;
+	// How much white is left on a row, by character. Keyed by path and not by row index for
+	// the same reason `selected_agent` is: the list is rebuilt whenever anything comes or
+	// goes, and an index would then be lighting up whoever moved into that place.
+	HashMap<String, float> blinks;
 
 	Ref<EditorDebuggerSession> session;
 	VBoxContainer *root_vb = nullptr;
@@ -153,6 +157,7 @@ private:
 	void _on_state_picked(const Ref<HSMStateSpec> &p_state);
 	void _apply_chain(const PackedStringArray &p_chain);
 	void _filter_changed(String p_text);
+	void _fade_blinks(double p_delta);
 	void _window_visibility_changed(bool p_visible);
 	void _resource_header_pressed();
 
@@ -167,6 +172,9 @@ public:
 	void update_active_hsms(const Array &p_data);
 	void update_hsm_structure(const Array &p_data);
 	void update_hsm_state(const Array &p_data);
+	// One machine moved, and that is the whole message. It arrives for every character on the
+	// map, the watched one included -- what it is for is the ones nobody is watching.
+	void update_hsm_activity(const Array &p_data);
 	BehaviorTreeView *get_behavior_tree_view() const { return bt_view; }
 	uint64_t get_selected_bt_instance_id();
 	void update_behavior_tree(const Ref<BehaviorTreeData> &p_data);

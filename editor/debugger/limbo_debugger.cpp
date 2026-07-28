@@ -251,6 +251,11 @@ void LimboDebugger::_send_hsm_structure() {
 	// mid-run shows nothing lit until it happens to move, and a machine that has settled
 	// somewhere may not move again at all.
 	arr.append(_active_chain(root));
+	// The file it was built from, if it was built from one. Not so that the editor can draw
+	// that file instead -- what is drawn has to be what is running -- but so that it can look
+	// up where each of these states was put by hand. A machine put together in code has none,
+	// and its picture is laid out by the fallback rows.
+	arr.append(root->get_hsm().is_valid() ? root->get_hsm()->get_path() : String());
 	EngineDebugger::get_singleton()->send_message("limboai:hsm_structure", arr);
 }
 
@@ -317,15 +322,30 @@ PackedStringArray LimboDebugger::_active_chain(LimboHSM *p_root) {
 }
 
 void LimboDebugger::hsm_state_changed(LimboHSM *p_machine, LimboState *p_from) {
-	if (tracked_hsm_id == 0 || p_machine == nullptr) {
+	if (!session_active || p_machine == nullptr) {
 		return;
 	}
 	LimboState *root_state = p_machine->get_root();
-	if (root_state == nullptr || uint64_t(root_state->get_instance_id()) != tracked_hsm_id) {
-		return;
-	}
 	LimboHSM *root = Object::cast_to<LimboHSM>(root_state);
 	if (root == nullptr) {
+		return;
+	}
+	uint64_t root_id = uint64_t(root->get_instance_id());
+	if (!active_hsms.has(root_id)) {
+		return;
+	}
+
+	// Everybody says *that* they moved; only the one being watched says what to. Two messages
+	// rather than one widened, because the two are of different sizes and go to different
+	// places: this one is a number, it is sent for every machine on the map, and all the far
+	// side does with it is make a row blink. Without it the list of characters looks exactly
+	// the same whether the map is busy or asleep, and the one thing a list of characters is
+	// well placed to say is which of them are doing something.
+	Array ping;
+	ping.append(root_id);
+	EngineDebugger::get_singleton()->send_message("limboai:hsm_activity", ping);
+
+	if (root_id != tracked_hsm_id) {
 		return;
 	}
 

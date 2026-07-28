@@ -26,6 +26,7 @@
 #define FILE_EXISTS(m_path) FileAccess::exists(m_path)
 #define DIR_ACCESS_CREATE() DirAccess::create(DirAccess::ACCESS_RESOURCES)
 #define ADD_STYLEBOX_OVERRIDE(m_control, m_name, m_stylebox) (m_control->add_theme_style_override(m_name, m_stylebox))
+#define REMOVE_STYLEBOX_OVERRIDE(m_control, m_name) (m_control->remove_theme_style_override(m_name))
 
 // * Enum
 
@@ -43,6 +44,7 @@
 #define FILE_EXISTS(m_path) FileAccess::file_exists(m_path)
 #define DIR_ACCESS_CREATE() DirAccess::open("res://")
 #define ADD_STYLEBOX_OVERRIDE(m_control, m_name, m_stylebox) (m_control->add_theme_stylebox_override(m_name, m_stylebox))
+#define REMOVE_STYLEBOX_OVERRIDE(m_control, m_name) (m_control->remove_theme_stylebox_override(m_name))
 
 // * Enum
 

@@ -33,6 +33,7 @@
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/input_event_mouse_button.hpp>
+#include <godot_cpp/classes/style_box_flat.hpp>
 #include <godot_cpp/classes/tree_item.hpp>
 #include <godot_cpp/classes/undo_redo.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
@@ -117,6 +118,7 @@ Ref<HSMStateSpec> _clone_state(const Ref<HSMStateSpec> &p_src, HashMap<uint64_t,
 	copy->set_behavior_tree(p_src->get_behavior_tree());
 	copy->set_graph_position(p_src->get_graph_position());
 	copy->set_graph_size(p_src->get_graph_size());
+	copy->set_anystate_graph_position(p_src->get_anystate_graph_position());
 	r_map[p_src->get_instance_id()] = copy;
 	r_pairs.push_back(ClonePair{ p_src, copy });
 
@@ -188,6 +190,94 @@ void HSMEditorView::_hide_ports(GraphNode *p_node) {
 	p_node->add_theme_icon_override("port", blank_port);
 }
 
+// The body of a node with nothing in it is still not flush with the title: the panel
+// keeps margins of its own above and below whatever stands there, and with nothing
+// standing there the two meet as one band of empty node. Emptied here rather than
+// assumed away -- the numbers belong to the theme, and only the theme knows them.
+//
+// Emptied, not closed up. A box needs room to finish being a box: the bottom keeps as
+// much as its own rounded corners and border need to be drawn, or the panel is cut off
+// square where it should curve back in -- and the line that is not there is also the line
+// that does not light up when the node is picked, so the highlight goes round three sides
+// and stops. That floor is asked of the stylebox rather than picked, because the corner
+// it has to clear is the theme's number and no one else's.
+//
+// Read on `theme_changed` and not at build time for two reasons, and the first is that
+// there is no theme to read yet: a Control answers with the default one until it is in
+// the tree, and these are made before they are added. The second is that an editor theme
+// is switched while the view is open, and a copy taken once would keep the old colors.
+void HSMEditorView::_trim_body(GraphNode *p_node) {
+	if (trimming) {
+		// Putting an override on is itself a theme change.
+		return;
+	}
+	trimming = true;
+	// Every panel the node draws with, not just the resting one: the size a Control asks
+	// for is worked out from one of them, and a state that gained a band of empty room the
+	// moment it was picked would read as the graph moving under the click.
+	const char *panels[] = { "panel", "panel_selected", "panel_focus" };
+	for (int i = 0; i < 3; i++) {
+		// Cleared before any of them is read. With an override in place the getter answers
+		// with our own copy, and a copy trimmed from a trimmed copy never sees the theme
+		// again.
+		REMOVE_STYLEBOX_OVERRIDE(p_node, StringName(panels[i]));
+	}
+
+	// One floor for all three and not one each: the three are the same box in different
+	// colors, but a picked one whose border is a hair thicker would ask for a taller node
+	// than the resting one, and the graph would twitch under the click that picked it.
+	//
+	// The height is the corner and nothing on top of it -- that is as little as a box can
+	// be given and still be closed, and any more is the empty band this whole thing is for
+	// taking away. What is bought with the room instead is the *arc*: given exactly the
+	// radius it asks for, the curve is the entire height and the side has no straight run
+	// left, so it is already turning where it meets the title bar's square corner and the
+	// two lines read as one crossing the other. So the corner is drawn a little smaller
+	// than the theme's, by as much as the border that draws it -- the thickness the eye is
+	// asked to follow round the turn -- and the difference becomes that straight run.
+	float floor = 0.0;
+	float straight = 2 * EDSCALE;
+	for (int i = 0; i < 3; i++) {
+		StringName name = StringName(panels[i]);
+		if (!p_node->has_theme_stylebox(name, "GraphNode")) {
+			continue;
+		}
+		Ref<StyleBox> base = p_node->get_theme_stylebox(name, "GraphNode");
+		Ref<StyleBoxFlat> flat = base;
+		if (flat.is_null()) {
+			// Some other kind of box draws by rules this cannot read. It keeps what it asked
+			// for below; only the room above the body goes.
+			floor = MAX(floor, base->get_margin(SIDE_BOTTOM));
+			continue;
+		}
+		floor = MAX(floor, MAX(flat->get_corner_radius(CORNER_BOTTOM_LEFT), flat->get_corner_radius(CORNER_BOTTOM_RIGHT)));
+		floor = MAX(floor, flat->get_border_width(SIDE_BOTTOM));
+		straight = MAX(straight, flat->get_border_width(SIDE_BOTTOM));
+		straight = MAX(straight, MAX(flat->get_border_width(SIDE_LEFT), flat->get_border_width(SIDE_RIGHT)));
+	}
+
+	for (int i = 0; i < 3; i++) {
+		StringName name = StringName(panels[i]);
+		if (!p_node->has_theme_stylebox(name, "GraphNode")) {
+			continue;
+		}
+		Ref<StyleBox> trimmed = p_node->get_theme_stylebox(name, "GraphNode")->duplicate();
+		Ref<StyleBoxFlat> flat = trimmed;
+		if (flat.is_valid()) {
+			// Only the two that are being asked to fit. The top pair is under the title bar
+			// and squared off there already.
+			int radius = int(MAX(floor - straight, 0.0f));
+			flat->set_corner_radius(CORNER_BOTTOM_LEFT, radius);
+			flat->set_corner_radius(CORNER_BOTTOM_RIGHT, radius);
+		}
+		// The top needs nothing: that edge is under the title bar, which draws its own.
+		trimmed->set_content_margin(SIDE_TOP, 0);
+		trimmed->set_content_margin(SIDE_BOTTOM, floor);
+		ADD_STYLEBOX_OVERRIDE(p_node, name, trimmed);
+	}
+	trimming = false;
+}
+
 // A machine that holds states is drawn as a node with those states standing *inside* it,
 // which is what `p_nests` asks for. Depth alone does not say what is in what: one column
 // further right and unrelated look the same, so the states of `Combat` read as siblings of
@@ -209,49 +299,52 @@ GraphNode *HSMEditorView::_make_node(const Ref<HSMStateSpec> &p_state, const Ref
 		// only kind of node here that can be resized, because it is the only one whose size
 		// means anything: the others are as big as their title.
 		HSMNestNode *nest = memnew(HSMNestNode);
-		nest->set_resizable(true);
+		nest->set_resizable(!read_only);
 		node = nest;
 	} else {
 		node = memnew(GraphNode);
 	}
+	// Nothing here is moved by hand while the machine belongs to a running game. Dragging one
+	// used to be allowed on the grounds that untangling a picture is reading it, but there is
+	// nowhere for the untangling to go: it lasts until the machine is picked again, and the
+	// arrangement it is undoing is the file's own -- which the graph now shows. A gesture that
+	// takes and does not keep is read as one that keeps.
+	node->set_draggable(!read_only);
 	node->set_name(_node_name_for(p_state));
 	node->set_title(String(p_state->get_state_name()));
-	base_titles[node->get_name()] = node->get_title();
 
 	Color color = COLOR_PLAIN;
-	// Empty unless there is something the color cannot say. A plain state used to read
-	// "state" under its own name, which is the picture repeating itself.
-	String kind;
 	if (p_state->is_machine()) {
 		color = COLOR_MACHINE;
 		// Nothing written: being a machine *is* holding states, and they are drawn in here.
 	} else if (p_state->get_behavior_tree().is_valid()) {
 		color = COLOR_TREE;
-		// The file name rather than the word "tree": the color already says it is one,
-		// and which one it is has no other place on the graph.
-		String path = p_state->get_behavior_tree()->get_path();
-		kind = path.is_empty() ? TTR("behavior tree") : path.get_file();
+		// Which tree it holds is not written either. It used to be the file name, and a
+		// name needs a body to stand in -- so the one kind of state that had something to
+		// say gave every *other* node a strip of empty room to match it. Which tree it is
+		// is read in the pane on the right, and that it holds one at all is the icon the
+		// list puts beside it.
 		node->set_tooltip_text(TTR("Its behavior tree is shown on the right."));
 	}
 
-	// A GraphNode needs at least one child control before slot 0 exists. When there is
-	// nothing to write, that child is an empty one rather than a label of filler -- and in
-	// a nest it is that same empty child, grown to the room the states need.
-	if (kind.is_empty()) {
-		Control *spacer = memnew(Control);
+	// A GraphNode needs at least one child control before slot 0 exists, so the body is an
+	// empty one rather than none at all.
+	Control *spacer = memnew(Control);
+	// A Control stops the mouse by default, and this one is laid over the whole body of
+	// its node -- including, in a nest, the room every state inside it stands in. Nothing
+	// is drawn here and nothing is clicked here; the node behind it decides.
+	spacer->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+	node->add_child(spacer);
+	if (p_nests) {
+		// A nest is the one node whose body is a picture -- the states standing in it --
+		// so it keeps a floor to be grown from.
 		spacer->set_custom_minimum_size(Size2(0, 4) * EDSCALE);
-		// A Control stops the mouse by default, and this one is laid over the whole body of
-		// its node -- including, in a nest, the room every state inside it stands in. Nothing
-		// is drawn here and nothing is clicked here; the node behind it decides.
-		spacer->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-		node->add_child(spacer);
-		if (p_nests && r_content != nullptr) {
+		if (r_content != nullptr) {
 			*r_content = spacer;
 		}
 	} else {
-		Label *label = memnew(Label);
-		label->set_text(kind);
-		node->add_child(label);
+		// Everywhere else the body is nothing, and nothing is drawn no taller than nothing.
+		node->connect("theme_changed", callable_mp(this, &HSMEditorView::_trim_body).bind(node));
 	}
 	node->set_slot(0, true, 0, color, true, 0, color);
 	_hide_ports(node);
@@ -276,23 +369,31 @@ GraphNode *HSMEditorView::_make_node(const Ref<HSMStateSpec> &p_state, const Ref
 
 GraphNode *HSMEditorView::_make_anystate_node(const Ref<HSMStateSpec> &p_machine, int p_depth, int p_row) {
 	GraphNode *node = memnew(GraphNode);
+	node->set_draggable(!read_only);
 	node->set_name(_anystate_node_name_for(p_machine));
 	node->set_title(String::utf8("✱ ANYSTATE"));
-	base_titles[node->get_name()] = node->get_title();
 
 	// It used to say "no state is being left" here. That is not what it *is*, it is what
 	// cannot be done to it, and where that belongs is the moment someone tries: aiming an
 	// edge at this node marks it refused before the click lands.
 	Control *spacer = memnew(Control);
-	spacer->set_custom_minimum_size(Size2(0, 4) * EDSCALE);
+	spacer->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
 	node->add_child(spacer);
+	node->connect("theme_changed", callable_mp(this, &HSMEditorView::_trim_body).bind(node));
 	// Only an outgoing port: ANYSTATE is never a destination.
 	node->set_slot(0, false, 0, COLOR_ANYSTATE, true, 0, COLOR_ANYSTATE);
 	_hide_ports(node);
 
 	node->connect("gui_input", callable_mp(this, &HSMEditorView::_on_graph_node_gui_input).bind(node->get_name()));
 
-	node->set_position_offset(Vector2(p_depth * COLUMN_WIDTH, p_row * ROW_HEIGHT));
+	// Kept by the machine, for the same reason a state's is kept by the state: it was put
+	// there by hand, and a picture that forgets half of what was arranged in it is a picture
+	// nobody arranges twice.
+	Vector2 pos = p_machine->get_anystate_graph_position();
+	if (pos == Vector2()) {
+		pos = Vector2(p_depth * COLUMN_WIDTH, p_row * ROW_HEIGHT);
+	}
+	node->set_position_offset(pos);
 	return node;
 }
 
@@ -461,6 +562,10 @@ void HSMEditorView::_fit_nests(int p_retry) {
 		nest.last_offset = offset;
 		_update_nest_hole(nest);
 	}
+	// The rings a running machine is drawn with are laid down where the nodes stood, and the
+	// nodes have just been moved. Nothing else moves them once a graph is up -- a read-only
+	// view is the only one that has rings, and nothing on it can be dragged.
+	graph->redraw_overlay();
 	// Deferred, unlike the one in refresh(): a fit also arrives from the end of a drag, and
 	// that is GraphEdit part-way through reading a press. Shuffling its children there is not
 	// something to find out about the hard way.
@@ -630,36 +735,63 @@ void HSMEditorView::_wire_graph(const Ref<HSMStateSpec> &p_machine) {
 void HSMEditorView::_populate_list(const Ref<HSMStateSpec> &p_machine, TreeItem *p_parent) {
 	ERR_FAIL_COND(p_machine.is_null());
 
-	TypedArray<HSMStateSpec> children = p_machine->get_children();
-	for (int i = 0; i < children.size(); i++) {
-		Ref<HSMStateSpec> spec = children[i];
+	// The initial child leads the list. It carries no mark of its own, so being the top
+	// row is the whole of "where does this machine start" -- and the declared order does
+	// not answer that on its own: merging appends what a child file adds, which leaves
+	// the boss machine's `Pattern` at the bottom of the very state it starts in.
+	// The graph and the file keep their own order; this one belongs to the list.
+	TypedArray<HSMStateSpec> declared = p_machine->get_children();
+	Ref<HSMStateSpec> initial = p_machine->get_initial_child();
+	Vector<Ref<HSMStateSpec>> children;
+	for (int i = 0; i < declared.size(); i++) {
+		Ref<HSMStateSpec> spec = declared[i];
 		if (spec.is_null()) {
 			continue;
 		}
+		if (spec == initial && !children.is_empty()) {
+			children.insert(0, spec);
+		} else {
+			children.push_back(spec);
+		}
+	}
+
+	for (int i = 0; i < children.size(); i++) {
+		const Ref<HSMStateSpec> &spec = children[i];
 		TreeItem *item = state_list->create_item(p_parent);
 		item->set_text(0, String(spec->get_state_name()));
 		item->set_metadata(0, Variant(int64_t(spec->get_instance_id())));
 
-		String suffix;
+		// What kind of state it is, said as a picture beside the name rather than as words
+		// after it. It used to read "Wary · BT", which is a caption -- it grows with the
+		// name, it is read left to right like the name, and it says in text what the three
+		// icons already in this editor say everywhere else.
 		Color color = COLOR_PLAIN;
+		String icon_name = "LimboState";
 		if (spec->is_machine()) {
 			color = COLOR_MACHINE;
+			icon_name = "LimboHSM";
 		} else if (spec->get_behavior_tree().is_valid()) {
 			color = COLOR_TREE;
-			suffix = " · BT";
+			icon_name = "BTState";
 		}
 		if (spec->is_inherited()) {
 			color.a = INHERITED_ALPHA;
 		}
-		if (color != COLOR_PLAIN) {
+		bool tinted = color != COLOR_PLAIN;
+		if (tinted) {
 			item->set_custom_color(0, color);
 		}
-		if (p_machine->get_initial_child() == spec) {
-			// The one place the file answers "where does this machine start".
-			suffix = String::utf8(" ▶") + suffix;
-		}
-		if (!suffix.is_empty()) {
-			item->set_text(0, String(spec->get_state_name()) + suffix);
+		Ref<Texture2D> icon = LimboUtility::get_singleton()->get_task_icon(icon_name);
+		if (icon.is_valid()) {
+			item->set_icon(0, icon);
+			// Held to the row's own height. These are the addon's files in an extension
+			// build, imported at whatever scale they were, and one that came in larger
+			// would set the height of every row in the list.
+			item->set_icon_max_width(0, 16 * EDSCALE);
+			// Whatever the name was given and nothing else: the icon and the word are one
+			// label, and an inherited state that dimmed only half of itself would read as
+			// half inherited. A name left to the theme leaves its icon alone too.
+			item->set_icon_modulate(0, tinted ? color : Color(1, 1, 1));
 		}
 
 		if (spec->is_machine()) {
@@ -680,7 +812,7 @@ void HSMEditorView::refresh() {
 	graph->clear_picked_connection();
 	graph->clear_connections();
 	// Only the elements we put there. GraphEdit keeps a non-internal `connections_layer`
-	// child of its own (and HSMGraphEdit a `pending_layer`), and removing either takes
+	// child of its own (and HSMGraphEdit an `overlay`), and removing either takes
 	// the lines with it -- after which every node move errors out. Neither is a
 	// GraphElement, which is what makes that cast the filter.
 	Vector<Node *> ours;
@@ -700,15 +832,16 @@ void HSMEditorView::refresh() {
 	anystate_machines.clear();
 	nests.clear();
 	nest_of.clear();
-	base_titles.clear();
 	// The nodes those edges ran between are gone, and an activity left standing would be
 	// handed to whichever connection inherits the pair of names.
 	pulses.clear();
+	// Same reasoning, one layer up: the rings name nodes that have just been deleted. The
+	// chain is put back by whoever is feeding this view, in the same frame.
+	graph->set_lit_nodes(Vector<StringName>());
 	set_process(false);
 	merged_root.unref();
 
 	if (hsm.is_null() || hsm->get_effective_root().is_null()) {
-		list_title->set_text(TTR("No state machine"));
 		updating = false;
 		return;
 	}
@@ -717,7 +850,6 @@ void HSMEditorView::refresh() {
 	// moment, and both of them can change between refreshes.
 	merged_root = hsm->get_effective_root();
 	Ref<HSMStateSpec> root = merged_root;
-	list_title->set_text(String(root->get_state_name()));
 
 	int row = 0;
 	_populate_graph(root, 0, row);
@@ -725,7 +857,12 @@ void HSMEditorView::refresh() {
 	_wire_graph(root);
 
 	TreeItem *tree_root = state_list->create_item();
-	tree_root->set_text(0, String(root->get_state_name()));
+	// The file, not the root state's name: which machine is on screen is what the top row
+	// answers, and every one of them has a root called much the same thing. A machine put
+	// together in code -- and one rebuilt from what the game reported -- has no file, and
+	// there the state's name is the only name there is.
+	String file = hsm->get_path().get_file();
+	tree_root->set_text(0, file.is_empty() ? String(root->get_state_name()) : file);
 	tree_root->set_metadata(0, Variant(int64_t(root->get_instance_id())));
 	_populate_list(root, tree_root);
 
@@ -1260,9 +1397,10 @@ void HSMEditorView::_on_graph_end_node_move() {
 		return;
 	}
 	if (read_only) {
-		// Dragging still works -- untangling a picture is reading it, not changing it -- but
-		// where a node was left is not written down. There is no file to write it to: this
-		// machine was built out of what the game reported a moment ago.
+		// Nothing here moves, so nothing here is saved: the nodes are not draggable at all
+		// when the machine belongs to a running game. The signal still arrives from a press
+		// that merely picked one, and a nest is refitted for the same reason it is anywhere
+		// else -- it is measured against what it holds, and that is cheap to be sure of.
 		_fit_nests();
 		return;
 	}
@@ -1277,6 +1415,24 @@ void HSMEditorView::_on_graph_end_node_move() {
 		}
 		DrawnState *entry = drawn.getptr(node->get_name());
 		if (entry == nullptr) {
+			// Not a state. The one other thing that is drawn and can be dragged is a ✱, and
+			// where it was left is the machine's to keep -- a drag that was quietly forgotten
+			// is worse here than a ✱ standing in the corner, because it looks like it took.
+			Ref<HSMStateSpec> *machine = anystate_machines.getptr(node->get_name());
+			if (machine == nullptr || machine->is_null()) {
+				continue;
+			}
+			Vector2 any_pos = node->get_position_offset().round();
+			if ((*machine)->get_anystate_graph_position() == any_pos) {
+				continue;
+			}
+			Ref<HSMStateSpec> any_authored = _authored_of(*machine, true);
+			if (any_authored.is_null()) {
+				continue;
+			}
+			(*machine)->set_anystate_graph_position(any_pos);
+			any_authored->set_anystate_graph_position(any_pos);
+			moved = true;
 			continue;
 		}
 		if (nest_of.has(node->get_name())) {
@@ -1637,7 +1793,7 @@ void HSMEditorView::set_read_only(bool p_read_only) {
 
 void HSMEditorView::set_active_chain(const Vector<Ref<HSMStateSpec>> &p_chain) {
 	Vector<StringName> lit;
-	StringName leaf;
+	Vector<uint64_t> lit_ids;
 	for (int i = 0; i < p_chain.size(); i++) {
 		if (p_chain[i].is_null()) {
 			continue;
@@ -1647,7 +1803,7 @@ void HSMEditorView::set_active_chain(const Vector<Ref<HSMStateSpec>> &p_chain) {
 			continue;
 		}
 		lit.push_back(*name);
-		leaf = *name;
+		lit_ids.push_back(p_chain[i]->get_instance_id());
 	}
 
 	for (int i = 0; i < graph->get_child_count(); i++) {
@@ -1660,14 +1816,42 @@ void HSMEditorView::set_active_chain(const Vector<Ref<HSMStateSpec>> &p_chain) {
 		// running, and dimming the whole picture for that would read as a fault.
 		bool on = lit.is_empty() || lit.has(name);
 		node->set_self_modulate(Color(1, 1, 1, on ? 1.0 : INACTIVE_ALPHA));
+	}
 
-		const String *base = base_titles.getptr(name);
-		if (base != nullptr) {
-			// The innermost one, marked. The chain is a line of boxes inside boxes and every
-			// one of them is lit, so without this the machine says which rooms it is in but
-			// not which one it is standing in.
-			node->set_title(name == leaf ? *base + String::utf8("  ●") : *base);
+	// Every one of them ringed, the machines included. The mark used to be a `●` after the
+	// innermost one's name, on the grounds that the chain is a line of boxes inside boxes and
+	// they cannot all be *the* state -- but a dot beside a word is read at the word's scale,
+	// and the thing it was marking is a box the size of a quarter of the graph. What answers
+	// "which one is it standing in" is the innermost ring, which is the only one with no ring
+	// inside it; what the outer ones answer is which rooms that is inside of, and both
+	// questions are asked by a reader looking at the picture rather than at a caption.
+	graph->set_lit_nodes(lit);
+	_mark_list(lit_ids);
+}
+
+void HSMEditorView::_mark_list(const Vector<uint64_t> &p_ids) {
+	// The theme's own selection color, so a marked row reads as a picked one -- which is what
+	// it is being asked to look like. It is not taken from the graph's ring: over there the
+	// ring had to be told apart from the node's selected border, and here there is no second
+	// mark to be told apart from.
+	Color color(1, 1, 1, 0.12);
+	if (state_list->has_theme_stylebox(StringName("selected"), "Tree")) {
+		Ref<StyleBoxFlat> box = state_list->get_theme_stylebox(StringName("selected"), "Tree");
+		if (box.is_valid()) {
+			color = box->get_bg_color();
 		}
+	}
+
+	TreeItem *item = state_list->get_root();
+	while (item != nullptr) {
+		if (p_ids.has(uint64_t(int64_t(item->get_metadata(0))))) {
+			item->set_custom_bg_color(0, color);
+		} else {
+			// Cleared and not skipped: the machine leaves states as often as it enters them,
+			// and a mark that is only ever put on would leave the whole path it has walked lit.
+			item->clear_custom_bg_color(0);
+		}
+		item = item->get_next_in_tree();
 	}
 }
 
@@ -1761,10 +1945,8 @@ HSMEditorView::HSMEditorView() {
 	list_box->set_custom_minimum_size(Size2(220, 0) * EDSCALE);
 	add_child(list_box);
 
-	list_title = memnew(Label);
-	list_title->set_text(TTR("States"));
-	list_box->add_child(list_title);
-
+	// No title above the list: it said the same thing the row under it says, and two
+	// labels for one machine are two places to read the same name from.
 	state_list = memnew(Tree);
 	state_list->set_h_size_flags(SIZE_EXPAND_FILL);
 	state_list->set_v_size_flags(SIZE_EXPAND_FILL);

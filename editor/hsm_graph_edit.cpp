@@ -54,6 +54,17 @@ const Color COLOR_PENDING = Color(0.55, 0.78, 1.0);
 const Color COLOR_TARGET_OK = Color(0.45, 0.90, 0.55);
 const Color COLOR_TARGET_NO = Color(0.95, 0.40, 0.40);
 
+// The ring around a node a running machine is standing in. It is drawn rather than switched
+// on, because what would be switched on is the node's own selected look -- and that one is
+// already answering a different question: which node the reader picked. Two questions, two
+// marks, and white is the one nothing else on this graph uses.
+//
+// Outside the node and not on its border: the border is the theme's, and a ring laid over it
+// would read as the node having changed rather than as something put around it.
+const Color COLOR_LIT = Color(1, 1, 1);
+const float LIT_GROW = 3.0;
+const float LIT_WIDTH = 2.0;
+
 // How near a press has to land to count as landing on an edge. GraphEdit's own default is
 // 4, which is about the thickness of the line -- and an edge here is a curve rather than the
 // straight run between two ports, so aiming at it is harder than aiming at those.
@@ -298,7 +309,47 @@ void HSMGraphEdit::_update_hover() {
 	GraphNode *node = _node_under(get_local_mouse_position());
 	hovered = node != nullptr ? node->get_name() : StringName();
 	// Always, not only when the node changed: the line itself follows the cursor.
-	pending_layer->queue_redraw();
+	overlay->queue_redraw();
+}
+
+void HSMGraphEdit::_draw_overlay() {
+	_draw_lit();
+	_draw_pending();
+}
+
+// The chain, drawn from the outside in. Order does not matter to the picture -- the rings do
+// not overlap, one being a box the other stands inside -- but it is the order the chain
+// arrives in and nothing here has a reason to change it.
+void HSMGraphEdit::_draw_lit() {
+	for (int i = 0; i < lit.size(); i++) {
+		GraphNode *node = Object::cast_to<GraphNode>(get_node_or_null(NodePath(String(lit[i]))));
+		if (node == nullptr || !node->is_visible()) {
+			continue;
+		}
+		overlay->draw_rect(_screen_rect_of(node).grow(LIT_GROW * EDSCALE), COLOR_LIT, false, LIT_WIDTH * EDSCALE);
+	}
+}
+
+void HSMGraphEdit::set_lit_nodes(const Vector<StringName> &p_names) {
+	lit = p_names;
+	// Above every node, and it has to be said again each time for the same reason
+	// begin_connect_from() says it: the view rebuilds its GraphNodes on every report from the
+	// game, and they land after whatever was already there.
+	move_child(overlay, get_child_count() - 1);
+	overlay->queue_redraw();
+}
+
+void HSMGraphEdit::redraw_overlay() {
+	overlay->queue_redraw();
+}
+
+void HSMGraphEdit::_on_scroll_offset_changed(const Vector2 &p_offset) {
+	if (lit.is_empty()) {
+		// Nothing is drawn on it while a machine is not being watched, and this fires on every
+		// pixel of every pan.
+		return;
+	}
+	overlay->queue_redraw();
 }
 
 void HSMGraphEdit::_draw_pending() {
@@ -313,7 +364,7 @@ void HSMGraphEdit::_draw_pending() {
 	float width = 2.0 * EDSCALE;
 
 	Rect2 from_rect = _screen_rect_of(from);
-	pending_layer->draw_rect(from_rect.grow(3.0 * EDSCALE), Color(COLOR_PENDING, 0.5), false, width);
+	overlay->draw_rect(from_rect.grow(3.0 * EDSCALE), Color(COLOR_PENDING, 0.5), false, width);
 
 	Vector2 mouse = get_local_mouse_position();
 	Vector2 dir = (mouse - from_rect.get_center()).normalized();
@@ -325,17 +376,17 @@ void HSMGraphEdit::_draw_pending() {
 	Color color = hovered.is_empty() ? COLOR_PENDING : (ok ? COLOR_TARGET_OK : COLOR_TARGET_NO);
 
 	Vector2 start = _edge_point(from_rect, dir) + dir * EDGE_GAP * zoom;
-	pending_layer->draw_line(start, mouse, color, width, true);
+	overlay->draw_line(start, mouse, color, width, true);
 	PackedVector2Array head;
 	// The tip is at the cursor and the wings open back down the line, which is the same
 	// shape a finished edge ends in -- the gesture looks like what it is about to make.
 	_add_head(head, mouse, -dir, zoom);
-	pending_layer->draw_polyline(head, color, width, true);
+	overlay->draw_polyline(head, color, width, true);
 
 	if (!hovered.is_empty()) {
 		GraphNode *node = Object::cast_to<GraphNode>(get_node_or_null(NodePath(String(hovered))));
 		if (node != nullptr) {
-			pending_layer->draw_rect(_screen_rect_of(node).grow(3.0 * EDSCALE), color, false, width);
+			overlay->draw_rect(_screen_rect_of(node).grow(3.0 * EDSCALE), color, false, width);
 		}
 	}
 }
@@ -347,9 +398,9 @@ void HSMGraphEdit::begin_connect_from(const StringName &p_from, const Vector<Str
 	hovered = StringName();
 	// Above every node, and it has to be moved again each time: the view rebuilds its
 	// GraphNodes on any edit, and they land after whatever was already there.
-	move_child(pending_layer, get_child_count() - 1);
+	move_child(overlay, get_child_count() - 1);
 	set_process_input(true);
-	pending_layer->queue_redraw();
+	overlay->queue_redraw();
 }
 
 void HSMGraphEdit::cancel_connect() {
@@ -405,7 +456,7 @@ void HSMGraphEdit::_stop_connecting() {
 	connect_targets.clear();
 	hovered = StringName();
 	set_process_input(false);
-	pending_layer->queue_redraw();
+	overlay->queue_redraw();
 }
 
 #ifdef LIMBOAI_GDEXTENSION
@@ -502,11 +553,19 @@ PackedVector2Array HSMGraphEdit::_get_connection_line(const Vector2 &p_from_posi
 	}
 
 	// Neither end is a port -- the minimap asks in its own coordinates, and nothing else
-	// drags a connection now that the hotzones are refused.
-	PackedVector2Array straight;
-	straight.push_back(p_from_position);
-	straight.push_back(p_to_position);
-	return straight;
+	// drags a connection now that the hotzones are refused. So this branch *is* the minimap,
+	// and what it is handed back is a line of no length: the map keeps the nodes and loses
+	// the edges. It could never draw the ones the graph draws -- it asks about points that
+	// find no node here, so every route it got back was the plain port-to-port line this
+	// editor exists to have taken apart, and a map drawn to different rules than the thing
+	// it is a map of is read as a second picture rather than a smaller one.
+	//
+	// Two points and not none: an empty polyline is a thing the drawing side has to have
+	// been written to expect, and this side cannot see whether it was.
+	PackedVector2Array none;
+	none.push_back(p_from_position);
+	none.push_back(p_from_position);
+	return none;
 }
 
 #endif // LIMBOAI_GDEXTENSION
@@ -526,11 +585,13 @@ void HSMGraphEdit::_bind_methods() {
 }
 
 HSMGraphEdit::HSMGraphEdit() {
-	pending_layer = memnew(Control);
-	pending_layer->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-	pending_layer->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
-	pending_layer->connect("draw", callable_mp(this, &HSMGraphEdit::_draw_pending));
-	add_child(pending_layer);
+	overlay = memnew(Control);
+	overlay->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+	overlay->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+	overlay->connect("draw", callable_mp(this, &HSMGraphEdit::_draw_overlay));
+	add_child(overlay);
+
+	connect("scroll_offset_changed", callable_mp(this, &HSMGraphEdit::_on_scroll_offset_changed));
 }
 
 #endif // ! TOOLS_ENABLED

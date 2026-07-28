@@ -84,6 +84,12 @@ private:
 	// otherwise worked out from the states standing in it. Zero means "whatever fits",
 	// which is why it is not a size the editor writes on every layout.
 	Vector2 graph_size;
+	// Where the ✱ node of *this* machine stands. It is drawn but it is not a state, so it
+	// has no state of its own to keep it -- and the machine is the only thing it belongs
+	// to: one ANYSTATE per machine, standing for the rows that leave no state in it. Kept
+	// beside the other two rather than in a map of its own, because it is answering the
+	// same question they answer, for the one drawn node that is not a child.
+	Vector2 anystate_graph_position;
 
 	// Transient, and only ever set on the tree HierarchicalStateMachine::get_effective_root()
 	// builds -- neither is a property, so neither is written to a file. `origin` is the
@@ -120,6 +126,9 @@ public:
 
 	void set_graph_size(const Vector2 &p_size);
 	Vector2 get_graph_size() const { return graph_size; }
+
+	void set_anystate_graph_position(const Vector2 &p_position);
+	Vector2 get_anystate_graph_position() const { return anystate_graph_position; }
 
 	// The declared value, without get_initial_child()'s fall back to the first child.
 	// Merging needs to tell "this file says nothing" from "this file says the first one".

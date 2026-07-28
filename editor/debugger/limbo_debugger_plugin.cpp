@@ -145,6 +145,63 @@ Ref<HierarchicalStateMachine> _machine_from_report(const String &p_root_name, co
 	return machine;
 }
 
+// Lays the arrangement of the file a machine was built from over the machine that was
+// reported. Only the three figures that say where things stand are taken: what states there
+// are, how they join, and which of them it is standing in stay the game's to answer, so a
+// file edited since launch can move the boxes about but cannot make the picture lie.
+//
+// Matched by the path of names down from the root, which is the one thing the two sides
+// certainly agree on -- LimboHSM names every node after the state it built it from. A state
+// the file no longer has simply keeps the fallback row, which is also what a machine put
+// together in code gets for all of them.
+void _apply_authored_layout(const String &p_source_path, HashMap<String, Ref<HSMStateSpec>> &r_by_path) {
+	if (p_source_path.is_empty()) {
+		return;
+	}
+	Ref<HierarchicalStateMachine> file = RESOURCE_LOAD(p_source_path, "HierarchicalStateMachine");
+	if (file.is_null()) {
+		return;
+	}
+	// Asked once and held: with a base, every call merges afresh and hands back a tree
+	// unrelated to the one the call before it handed back.
+	Ref<HSMStateSpec> root = file->get_effective_root();
+	if (root.is_null()) {
+		return;
+	}
+	for (KeyValue<String, Ref<HSMStateSpec>> &entry : r_by_path) {
+		Ref<HSMStateSpec> authored = root;
+		PackedStringArray names = entry.key.split("/", false);
+		for (int i = 0; i < names.size() && authored.is_valid(); i++) {
+			Ref<HSMStateSpec> found;
+			TypedArray<HSMStateSpec> children = authored->get_children();
+			for (int j = 0; j < children.size(); j++) {
+				Ref<HSMStateSpec> child = children[j];
+				if (child.is_valid() && String(child->get_state_name()) == names[i]) {
+					found = child;
+					break;
+				}
+			}
+			authored = found;
+		}
+		if (authored.is_null()) {
+			continue;
+		}
+		entry.value->set_graph_position(authored->get_graph_position());
+		entry.value->set_graph_size(authored->get_graph_size());
+		entry.value->set_anystate_graph_position(authored->get_anystate_graph_position());
+	}
+}
+
+// A row goes white when its character's machine moves, and fades back. The same shape the
+// graph's edges fade with, and for the same reason: a mark that is switched off by the next
+// one reads as a fault when the next one is a tenth of a second later, which for a machine
+// being poked at is most of them.
+const float BLINK_SECONDS = 0.5;
+// Slight. It is a row in a list, not a thing being pointed at -- the character being read is
+// still the one with the selection on it, and a flash that outshone that would be answering
+// "who is busy" over "who am I looking at".
+const float BLINK_ALPHA = 0.3;
+
 // What a path is called: its last name. The path itself is the tooltip -- it is what tells
 // two of a kind apart, and it is also far too long to read at a glance in a list.
 String _leaf_of(const String &p_path) {
@@ -161,6 +218,8 @@ struct LimboDebuggerTab::AgentRowSorter {
 };
 
 void LimboDebuggerTab::_reset_controls() {
+	blinks.clear();
+	set_process(false);
 	agent_list->clear();
 	bt_view->clear();
 	history->clear();
@@ -173,12 +232,16 @@ void LimboDebuggerTab::_reset_controls() {
 }
 
 void LimboDebuggerTab::start_session() {
+	blinks.clear();
+	set_process(false);
 	agent_list->clear();
 	bt_view->clear();
 	history->clear();
 	_clear_machine();
 	alert_box->hide();
-	info_message->set_text(TTR("Pick a character from the list to display its state machine."));
+	// Not "pick one": the first to turn up is picked on its own, so what this stands for is
+	// the moment before there is anybody to pick.
+	info_message->set_text(TTR("Waiting for a character with a state machine."));
 	info_message->show();
 	session->send_message("limboai:start_session", Array());
 }
@@ -316,10 +379,83 @@ void LimboDebuggerTab::_update_agent_list(const String &p_filter) {
 	if (select_idx > -1) {
 		agent_list->select(select_idx);
 		_show_alert("");
-	} else if (!selected_agent.is_empty()) {
-		_show_alert(selection_filtered_out ? String() : TTR("The selected character is no longer present."));
+		return;
+	}
+	if (selection_filtered_out) {
+		// Still on the map, just not in this list. Picking somebody else because a word was
+		// typed in the filter box would be the filter changing what is being watched.
+		_show_alert("");
 		_track_hsm(0);
 		_track_bt(0);
+		return;
+	}
+
+	// Nothing is picked -- either nothing ever was, or whoever was being read has just died.
+	// The two are one case: there is a list and nobody is being watched, and the machine that
+	// answers that is the first row. Waiting to be told which one costs the first seconds of
+	// every session, which are the seconds a machine does most of its moving in.
+	bool was_watching = !selected_agent.is_empty();
+	selected_agent = String();
+	if (agent_list->get_item_count() > 0) {
+		agent_list->select(0);
+		// ItemList::select() is silent, so the work a click would have done is done by hand.
+		_agent_selected(0);
+		if (was_watching) {
+			// Said afterwards, because picking clears it. Without it the pane has changed
+			// what it is about without being asked to, and the lit row says which character
+			// is being read but not that it is a different one.
+			_show_alert(TTR("The character being watched is gone. Showing the first in the list."));
+		}
+		return;
+	}
+
+	_show_alert(was_watching ? TTR("The selected character is no longer present.") : String());
+	_track_hsm(0);
+	_track_bt(0);
+}
+
+void LimboDebuggerTab::update_hsm_activity(const Array &p_data) {
+	if (p_data.is_empty()) {
+		return;
+	}
+	uint64_t hsm_id = uint64_t(p_data[0]);
+	for (const AgentRow &row : agent_rows) {
+		if (row.hsm_id != hsm_id) {
+			continue;
+		}
+		// Set, not added to. A machine that moved twice in a frame did not move twice as
+		// brightly, and the reader is being told one thing either way.
+		blinks[row.agent_path] = 1.0;
+		set_process(true);
+		return;
+	}
+}
+
+// The fade, and the putting of it on the rows in one pass -- which is also what keeps a
+// rebuilt list right: the mark belongs to a character, the row is only where that character
+// happens to be standing this frame, and every frame asks again. Switched off the moment
+// nothing is glowing, because a debugger tab left open is a tab left open for hours.
+void LimboDebuggerTab::_fade_blinks(double p_delta) {
+	Vector<String> done;
+	for (KeyValue<String, float> &entry : blinks) {
+		entry.value -= float(p_delta) / BLINK_SECONDS;
+		if (entry.value <= 0.0) {
+			done.push_back(entry.key);
+		}
+	}
+	for (int i = 0; i < done.size(); i++) {
+		blinks.erase(done[i]);
+	}
+
+	for (int i = 0; i < agent_list->get_item_count(); i++) {
+		String path = agent_list->get_item_metadata(i);
+		const float *amount = blinks.getptr(path);
+		// Transparent is ItemList's own word for "no custom background", so the row goes back
+		// to being drawn by the theme rather than being drawn white at zero alpha.
+		agent_list->set_item_custom_bg_color(i, amount != nullptr ? Color(1, 1, 1, *amount * BLINK_ALPHA) : Color(0, 0, 0, 0));
+	}
+	if (blinks.is_empty()) {
+		set_process(false);
 	}
 }
 
@@ -383,13 +519,16 @@ void LimboDebuggerTab::_track_hsm(uint64_t p_hsm_id) {
 }
 
 void LimboDebuggerTab::update_hsm_structure(const Array &p_data) {
-	if (p_data.size() < 4 || uint64_t(p_data[0]) != shown_hsm_id) {
+	if (p_data.size() < 5 || uint64_t(p_data[0]) != shown_hsm_id) {
 		return;
 	}
 	const AgentRow *row = _row_for(selected_agent);
 	String root_name = row != nullptr ? _leaf_of(row->hsm_node_path) : String("HSM");
 
 	live_machine = _machine_from_report(root_name, p_data[1], p_data[2], state_by_path, path_by_state);
+	// Before the view is handed it: a nest is sized around what stands in it, and what stands
+	// in it is only in the right place once this has run.
+	_apply_authored_layout(p_data[4], state_by_path);
 	hsm_view->edit_hsm(live_machine);
 	_apply_chain(p_data[3]);
 	// Which tree is up is settled by this, message and all -- there is nothing left here to
@@ -545,6 +684,9 @@ void LimboDebuggerTab::_bind_methods() {
 
 void LimboDebuggerTab::_notification(int p_what) {
 	switch (p_what) {
+		case NOTIFICATION_PROCESS: {
+			_fade_blinks(get_process_delta_time());
+		} break;
 		case NOTIFICATION_READY: {
 			resource_header->connect(LW_NAME(pressed), callable_mp(this, &LimboDebuggerTab::_resource_header_pressed));
 			filter_players->connect(LW_NAME(text_changed), callable_mp(this, &LimboDebuggerTab::_filter_changed));
@@ -751,6 +893,8 @@ bool LimboDebuggerPlugin::_capture(const String &p_message, const Array &p_data,
 		tab->update_hsm_structure(p_data);
 	} else if (p_message == "limboai:hsm_state") {
 		tab->update_hsm_state(p_data);
+	} else if (p_message == "limboai:hsm_activity") {
+		tab->update_hsm_activity(p_data);
 	} else if (p_message == "limboai:bt_update") {
 		Ref<BehaviorTreeData> data = BehaviorTreeData::deserialize(p_data);
 		if (data->bt_instance_id == tab->get_selected_bt_instance_id()) {

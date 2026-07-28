@@ -68,10 +68,15 @@ class HSMGraphEdit : public GraphEdit {
 	GDCLASS(HSMGraphEdit, GraphEdit);
 
 private:
-	// Drawn on top of the nodes, so the line being dragged is not buried under them. A
+	// Drawn on top of the nodes, so what is drawn over them is not buried under them. A
 	// plain Control rather than a class of its own -- it holds nothing, and the view only
 	// ever deletes GraphNode children, so it survives a rebuild.
-	Control *pending_layer = nullptr;
+	//
+	// Two things ride on it: the line being aimed, and the ring around whatever a running
+	// machine is standing in. One layer for both because the two are the same kind of thing --
+	// something drawn about a node rather than by it -- and they are never on at once anyway,
+	// the second only ever appearing on a read-only view.
+	Control *overlay = nullptr;
 	bool connecting = false;
 	StringName connect_from;
 	Vector<StringName> connect_targets;
@@ -83,6 +88,11 @@ private:
 	// question only the view can answer, and it is asked once the click has been placed.
 	StringName picked_from;
 	StringName picked_to;
+
+	// The nodes a running machine is standing in, outermost first. Names and not nodes: a
+	// rebuild throws every node away, and a pointer kept here would be drawn a ring around
+	// after it had been deleted.
+	Vector<StringName> lit;
 	bool _pick_connection_at(const Vector2 &p_position);
 	void _clear_pick();
 	void _mark_pick(float p_activity);
@@ -106,8 +116,13 @@ private:
 	GraphNode *_node_under(const Vector2 &p_local) const;
 	bool _is_target(const StringName &p_name) const;
 	void _update_hover();
+	void _draw_overlay();
+	void _draw_lit();
 	void _draw_pending();
 	void _stop_connecting();
+	// The ring is laid down in screen coordinates, so it has to be laid down again whenever
+	// the nodes move under it. Panning and zooming both arrive here.
+	void _on_scroll_offset_changed(const Vector2 &p_offset);
 
 protected:
 	static void _bind_methods();
@@ -137,6 +152,14 @@ public:
 
 	// Dropped without a signal: every caller of it is already about to redraw the graph.
 	void clear_picked_connection() { _clear_pick(); }
+
+	// Every node on the chain and not only the innermost, because a machine is one of them:
+	// a state standing inside `Combat` is two answers to "where is it", and a ring around
+	// only the inner one leaves the box it is in reading like any other box on the graph.
+	void set_lit_nodes(const Vector<StringName> &p_names);
+	// For whoever moved the nodes without the graph hearing of it -- the view's own fit does
+	// exactly that, deferred, after every rebuild.
+	void redraw_overlay();
 
 	HSMGraphEdit();
 };

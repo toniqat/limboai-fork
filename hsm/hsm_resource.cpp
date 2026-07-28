@@ -133,6 +133,11 @@ void HSMStateSpec::set_graph_size(const Vector2 &p_size) {
 	emit_changed();
 }
 
+void HSMStateSpec::set_anystate_graph_position(const Vector2 &p_position) {
+	anystate_graph_position = p_position;
+	emit_changed();
+}
+
 StringName HSMStateSpec::resolve_base_type() const {
 	if (state_script.is_valid()) {
 		StringName base = state_script->get_instance_base_type();
@@ -172,6 +177,8 @@ void HSMStateSpec::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_graph_position"), &HSMStateSpec::get_graph_position);
 	ClassDB::bind_method(D_METHOD("set_graph_size", "size"), &HSMStateSpec::set_graph_size);
 	ClassDB::bind_method(D_METHOD("get_graph_size"), &HSMStateSpec::get_graph_size);
+	ClassDB::bind_method(D_METHOD("set_anystate_graph_position", "position"), &HSMStateSpec::set_anystate_graph_position);
+	ClassDB::bind_method(D_METHOD("get_anystate_graph_position"), &HSMStateSpec::get_anystate_graph_position);
 	ClassDB::bind_method(D_METHOD("is_machine"), &HSMStateSpec::is_machine);
 	ClassDB::bind_method(D_METHOD("resolve_base_type"), &HSMStateSpec::resolve_base_type);
 	ClassDB::bind_method(D_METHOD("get_declared_initial_child"), &HSMStateSpec::get_declared_initial_child);
@@ -192,6 +199,7 @@ void HSMStateSpec::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "transitions", PROPERTY_HINT_ARRAY_TYPE, RESOURCE_TYPE_HINT("HSMTransition")), "set_transitions", "get_transitions");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2, "graph_position"), "set_graph_position", "get_graph_position");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2, "graph_size"), "set_graph_size", "get_graph_size");
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2, "anystate_graph_position"), "set_anystate_graph_position", "get_anystate_graph_position");
 }
 
 HSMStateSpec::HSMStateSpec() {
@@ -237,6 +245,7 @@ Ref<HSMStateSpec> _copy_values(const Ref<HSMStateSpec> &p_src) {
 	out->set_behavior_tree(p_src->get_behavior_tree());
 	out->set_graph_position(p_src->get_graph_position());
 	out->set_graph_size(p_src->get_graph_size());
+	out->set_anystate_graph_position(p_src->get_anystate_graph_position());
 	return out;
 }
 
@@ -291,6 +300,9 @@ void _overlay(const Ref<HSMStateSpec> &p_dst, const Ref<HSMStateSpec> &p_src,
 	}
 	if (p_src->get_graph_size() != Vector2()) {
 		p_dst->set_graph_size(p_src->get_graph_size());
+	}
+	if (p_src->get_anystate_graph_position() != Vector2()) {
+		p_dst->set_anystate_graph_position(p_src->get_anystate_graph_position());
 	}
 
 	TypedArray<HSMStateSpec> src_children = p_src->get_children();

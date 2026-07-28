@@ -106,7 +106,6 @@ private:
 	};
 
 	VBoxContainer *list_box;
-	Label *list_title;
 	// No toolbar of its own: what could stand here -- add a state, add a machine, remove one --
 	// is on the main screen's toolbar, which is the one place that already knows whether the
 	// open document is a machine at all. Two rows of the same three buttons a finger apart is
@@ -163,6 +162,9 @@ private:
 	// While the view is the one moving nodes. A nest hands a drag down to what it holds,
 	// and a fit moves the nest itself -- without this the second would read as the first.
 	bool adjusting = false;
+	// While a node's panels are being emptied of their margins. Putting a style override on
+	// is a theme change, and a theme change is what asks for the trim.
+	bool trimming = false;
 
 	// ── Watching one that runs ──
 	// The debugger draws with this same view. A machine on disk and the same machine on the
@@ -170,10 +172,6 @@ private:
 	// only screen that can answer "where is it right now" is the one the game is feeding.
 	// What is given up for it is every gesture that writes.
 	bool read_only = false;
-	// The title each node was built with. The mark on the active leaf is put on and taken
-	// off far more often than the graph is rebuilt, and a title with a mark already on it is
-	// not something to append a second one to.
-	HashMap<StringName, String> base_titles;
 	// An edge that was taken lately, and how much of the glow is left. It fades on its own
 	// rather than being switched off by the next one: two states swapping back and forth is
 	// the commonest picture a machine makes, and one line switching on and off reads as a
@@ -189,6 +187,7 @@ private:
 	static StringName _anystate_node_name_for(const Ref<HSMStateSpec> &p_machine);
 
 	void _hide_ports(GraphNode *p_node);
+	void _trim_body(GraphNode *p_node);
 	GraphNode *_make_node(const Ref<HSMStateSpec> &p_state, const Ref<HSMStateSpec> &p_machine, int p_depth, int p_row, bool p_nests, Control **r_content);
 	GraphNode *_make_anystate_node(const Ref<HSMStateSpec> &p_machine, int p_depth, int p_row);
 	// Where a node stands. A nest's own size only reaches the node a layout pass later, so
@@ -276,6 +275,11 @@ private:
 	void _on_delete_nodes_request(const TypedArray<StringName> &p_nodes);
 
 	void _fade_pulses(double p_delta);
+	// The same chain, said in the list. Rows are marked rather than selected: selecting one
+	// is a thing the reader does, it carries the Inspector and the tree pane with it, and a
+	// machine that took the selection every time it moved would take them from under a hand
+	// that had just put them somewhere.
+	void _mark_list(const Vector<uint64_t> &p_ids);
 
 protected:
 	static void _bind_methods();
