@@ -18,96 +18,35 @@
 #include "core/templates/hash_set.h"
 #include "scene/gui/box_container.h"
 #include "scene/gui/button.h"
-#include "scene/gui/flow_container.h"
 #include "scene/gui/line_edit.h"
 #include "scene/gui/panel_container.h"
 #include "scene/gui/popup.h"
+#include "scene/gui/rich_text_label.h"
 #include "scene/gui/scroll_container.h"
+#include "scene/gui/tree.h"
 #endif // LIMBOAI_MODULE
 
 #ifdef LIMBOAI_GDEXTENSION
 #include <godot_cpp/classes/button.hpp>
-#include <godot_cpp/classes/h_flow_container.hpp>
 #include <godot_cpp/classes/line_edit.hpp>
 #include <godot_cpp/classes/panel_container.hpp>
 #include <godot_cpp/classes/popup_panel.hpp>
+#include <godot_cpp/classes/rich_text_label.hpp>
 #include <godot_cpp/classes/scroll_container.hpp>
+#include <godot_cpp/classes/tree.hpp>
 #include <godot_cpp/classes/v_box_container.hpp>
 #include <godot_cpp/templates/hash_set.hpp>
 using namespace godot;
 #endif // LIMBOAI_GDEXTENSION
-
-class TaskButton : public Button {
-	GDCLASS(TaskButton, Button);
-
-private:
-	String task_meta;
-
-	Control *_do_make_tooltip() const;
-
-#ifdef LIMBOAI_MODULE
-	String _module_get_help_description(const String &p_class_or_script_path) const;
-#endif
-
-protected:
-	static void _bind_methods();
-
-public:
-#ifdef LIMBOAI_MODULE
-	virtual Control *make_custom_tooltip(const String &p_text) const override { return _do_make_tooltip(); }
-#elif LIMBOAI_GDEXTENSION
-	virtual Object *_make_custom_tooltip(const String &p_text) const override { return _do_make_tooltip(); }
-#endif
-
-	String get_task_meta() const { return task_meta; }
-	void set_task_meta(const String &p_task_meta) { task_meta = p_task_meta; }
-
-	TaskButton();
-};
-
-class TaskPaletteSection : public VBoxContainer {
-	GDCLASS(TaskPaletteSection, VBoxContainer);
-
-private:
-	struct ThemeCache {
-		Ref<Texture2D> arrow_down_icon;
-		Ref<Texture2D> arrow_right_icon;
-	} theme_cache;
-
-	HFlowContainer *tasks_container;
-	Button *section_header;
-
-	void _on_task_button_pressed(const String &p_task);
-	void _on_task_button_gui_input(const Ref<InputEvent> &p_event, const String &p_task);
-	void _on_header_pressed();
-
-protected:
-	static void _bind_methods();
-
-	void _notification(int p_what);
-
-	virtual void _do_update_theme_item_cache();
-
-public:
-	void set_filter(String p_filter);
-	void add_task_button(const String &p_name, const Ref<Texture> &icon, const String &p_meta);
-
-	void set_collapsed(bool p_collapsed);
-	bool is_collapsed() const;
-
-	String get_category_name() const { return section_header->get_text(); }
-	void set_category_name(const String &p_cat) { section_header->set_text(p_cat); }
-
-	TaskPaletteSection();
-	~TaskPaletteSection();
-};
 
 class TaskPalette : public PanelContainer {
 	GDCLASS(TaskPalette, PanelContainer)
 
 private:
 	enum MenuAction {
+		MENU_ADD_TASK,
 		MENU_EDIT_SCRIPT,
+		MENU_SHOW_IN_FILESYSTEM,
 		MENU_OPEN_DOC,
 		MENU_FAVORITE,
 	};
@@ -135,10 +74,41 @@ private:
 		Ref<Texture2D> remove_from_favorites_icon;
 
 		Ref<StyleBox> category_choice_background;
+
+		Ref<Texture2D> folder_icon;
+		Color folder_icon_color;
 	} theme_cache;
 
 	LineEdit *filter_edit;
-	VBoxContainer *sections;
+	// FileSystem-style tree: a "LimboAI" root holding the core categories and a "Project" root
+	// holding the categories of user_task_dirs. Folder items carry FOLDER_PREFIX + their key
+	// ("core/Actions", "user/Combat") as metadata, task items carry their task meta (class name
+	// or script path), which never begins with the prefix.
+	Tree *tree;
+	// Folder keys the user has collapsed. The tree is rebuilt on every refresh, so this is what
+	// survives it, and what is saved in the editor layout.
+	HashSet<String> collapsed_folders;
+	bool collapsed_folders_loaded = false;
+	// While a filter is typed every folder with a match is expanded; programmatic expansion and
+	// the user's own toggling during a filter do not touch collapsed_folders.
+	bool filtering = false;
+	bool updating_tree = false;
+
+	// Sticky headers: the folders the first visible row sits in, pinned over the top of the
+	// tree while it is scrolled. Tree (as of 4.7) has no such mode, and it draws its rows on a
+	// canvas item of its own, so this is a child control laid over them rather than a draw
+	// callback on the tree. Clicking a pinned row scrolls to that folder.
+	Control *sticky_overlay;
+	// The selected task's full description, beside the tree once the palette is wide enough
+	// for both (DESCRIPTION_MIN_WIDTH). Never shown in the change-type dialog.
+	PanelContainer *description_pane;
+	RichTextLabel *description_text;
+	Vector<TreeItem *> sticky_items;
+	float sticky_row_height = 0.0;
+	// Where Tree starts its rows: the panel's top-left margin. The pinned rows sit there too,
+	// while their background runs from the very top, since Tree draws rows into that margin.
+	Vector2 sticky_content_ofs;
+	int sticky_hovered = -1;
 	PopupMenu *menu;
 	Button *tool_filters;
 	Button *tool_refresh;
@@ -161,8 +131,25 @@ private:
 	bool dialog_mode = false;
 
 	void _menu_action_selected(int p_id);
-	void _on_task_button_pressed(const String &p_task);
 	void _on_task_button_rmb(const String &p_task);
+	void _on_item_mouse_selected(const Vector2 &p_pos, MouseButton p_button_index);
+	void _on_item_collapsed(Object *p_item);
+	TreeItem *_create_folder(TreeItem *p_parent, const String &p_text, const String &p_key, const Ref<Texture2D> &p_icon);
+	// The `##` doc comment of a task script, or a core task's brief (`p_full` false, the
+	// tooltip) or full description (`p_full` true, the description pane).
+	String _get_task_description(const String &p_task_meta, bool p_full) const;
+	void _update_description();
+	void _update_description_visibility();
+	void _load_collapsed_folders();
+	Variant _get_drag_data_fw(const Point2 &p_point);
+	bool _can_drop_data_fw(const Point2 &p_point, const Variant &p_data) const { return false; }
+	void _drop_data_fw(const Point2 &p_point, const Variant &p_data) {}
+	void _update_sticky_headers();
+	void _draw_sticky_headers();
+	void _on_sticky_gui_input(const Ref<InputEvent> &p_event);
+	void _on_sticky_mouse_exited();
+	int _sticky_row_at(float p_y) const;
+	float _row_content_y(TreeItem *p_item) const;
 	void _apply_filter(const String &p_text);
 	void _update_filter_popup();
 	void _show_filter_popup();

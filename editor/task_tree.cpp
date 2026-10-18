@@ -49,7 +49,7 @@ TreeItem *TaskTree::_create_tree(const Ref<BTTask> &p_task, TreeItem *p_parent, 
 	_update_item(item);
 
 	// update TreeSearch if root task was created
-	if (tree->get_root() == item) {
+	if (item->get_parent() == tree->get_root()) {
 		tree_search->update_search(tree);
 	}
 
@@ -57,7 +57,7 @@ TreeItem *TaskTree::_create_tree(const Ref<BTTask> &p_task, TreeItem *p_parent, 
 }
 
 void TaskTree::_update_item(TreeItem *p_item) {
-	if (p_item == nullptr) {
+	if (p_item == nullptr || _is_file_item(p_item)) {
 		return;
 	}
 
@@ -126,15 +126,28 @@ void TaskTree::_update_tree() {
 		return;
 	}
 
+	updating_tree = true;
+	TreeItem *file_item = _create_file_item();
 	if (bt->get_root_task().is_valid()) {
-		updating_tree = true;
-		_create_tree(bt->get_root_task(), nullptr);
-		updating_tree = false;
+		_create_tree(bt->get_root_task(), file_item);
 	}
+	updating_tree = false;
 
 	for (const Ref<BTTask> &task : selection) {
 		add_selection(task);
 	}
+}
+
+TreeItem *TaskTree::_create_file_item() {
+	TreeItem *item = tree->create_item();
+	String path = bt->get_path();
+	item->set_text(0, path.is_empty() ? String("[new]") : path.get_file());
+	item->set_tooltip_text(0, path);
+	item->set_icon(0, LimboUtility::get_singleton()->get_task_icon("BehaviorTree"));
+	item->set_icon_max_width(0, 16 * EDSCALE);
+	item->set_custom_font(0, theme_cache.custom_name_font);
+	item->set_editable(0, false);
+	return item;
 }
 
 TreeItem *TaskTree::_find_item(const Ref<BTTask> &p_task) const {
@@ -176,12 +189,21 @@ void TaskTree::_on_item_selected() {
 		}
 	}
 	last_selected = get_selected();
+	if (last_selected.is_null()) {
+		// The file item: it has no task to watch, it stands for the tree resource itself.
+		if (_is_file_item(tree->get_selected())) {
+			emit_signal("behavior_tree_selected", bt);
+		}
+		return;
+	}
 	last_selected->connect(LW_NAME(changed), on_task_changed);
 	emit_signal(LW_NAME(task_selected), last_selected);
 }
 
 void TaskTree::_on_item_activated() {
-	emit_signal(LW_NAME(task_activated));
+	if (get_selected().is_valid()) {
+		emit_signal(LW_NAME(task_activated));
+	}
 }
 
 void TaskTree::_on_item_collapsed(Object *p_obj) {
@@ -190,7 +212,7 @@ void TaskTree::_on_item_collapsed(Object *p_obj) {
 	}
 
 	TreeItem *item = Object::cast_to<TreeItem>(p_obj);
-	if (!item) {
+	if (!item || _is_file_item(item)) {
 		return;
 	}
 
@@ -239,11 +261,12 @@ void TaskTree::load_bt(const Ref<BehaviorTree> &p_behavior_tree) {
 	}
 
 	probability_rect_cache.clear();
+	updating_tree = true;
+	TreeItem *file_item = _create_file_item();
 	if (bt->get_root_task().is_valid()) {
-		updating_tree = true;
-		_create_tree(bt->get_root_task(), nullptr);
-		updating_tree = false;
+		_create_tree(bt->get_root_task(), file_item);
 	}
+	updating_tree = false;
 }
 
 void TaskTree::unload() {
@@ -407,8 +430,17 @@ bool TaskTree::_can_drop_data_fw(const Point2 &p_point, const Variant &p_data) c
 	}
 
 	Dictionary d = p_data;
-	if (!d.has("type") || !d.has("tasks")) {
+	if (!d.has("type")) {
 		return false;
+	}
+
+	bool from_palette = String(d["type"]) == "palette_task";
+	if (from_palette) {
+		// A drag that began in the palette never went through _get_drag_data_fw, so the drop
+		// sections are switched on here, before they are read. Tree switches them off again when
+		// any drag ends; left on, every hover is read as a drop (indicator lines, an arrow on
+		// leaf rows, no hover highlight).
+		tree->set_drop_mode_flags(Tree::DROP_MODE_INBETWEEN | Tree::DROP_MODE_ON_ITEM);
 	}
 
 	int section = tree->get_drop_section_at_position(p_point);
@@ -417,7 +449,16 @@ bool TaskTree::_can_drop_data_fw(const Point2 &p_point, const Variant &p_data) c
 		return false;
 	}
 
-	if (!item->get_parent() && section < 0) { // Before root item.
+	if (from_palette) {
+		int to_pos = -1;
+		Ref<BTTask> to_task;
+		return _normalize_palette_drop(item, section, to_pos, to_task);
+	}
+
+	if (!d.has("tasks") || _is_file_item(item)) {
+		return false;
+	}
+	if (_is_file_item(item->get_parent()) && section < 0) { // Before root task.
 		return false;
 	}
 
@@ -447,14 +488,22 @@ bool TaskTree::_can_drop_data_fw(const Point2 &p_point, const Variant &p_data) c
 
 void TaskTree::_drop_data_fw(const Point2 &p_point, const Variant &p_data) {
 	Dictionary d = p_data;
-	if (!d.has("tasks")) {
-		return;
-	}
-
 	TreeItem *item = tree->get_item_at_position(p_point);
 	int type = tree->get_drop_section_at_position(p_point);
 	ERR_FAIL_NULL(item);
 	ERR_FAIL_COND(type < -1 || type > 1);
+
+	if (String(d.get("type", "")) == "palette_task") {
+		int to_pos = -1;
+		Ref<BTTask> to_task;
+		if (_normalize_palette_drop(item, type, to_pos, to_task)) {
+			emit_signal("palette_task_dropped", d["task_meta"], to_task, to_pos);
+		}
+		return;
+	}
+	if (!d.has("tasks")) {
+		return;
+	}
 
 	// The drop behavior depends on the TreeItem's state.
 	// Normalize and emit the parent task and position instead of exposing TreeItem.
@@ -512,6 +561,43 @@ void TaskTree::_normalize_drop(TreeItem *item, int type, int &to_pos, Ref<BTTask
 	}
 }
 
+// Where a task dragged in from the palette lands: on an item it becomes the last child, above
+// or below it a sibling (below an expanded parent, its first child). A null `r_to_task` means
+// the tree is empty and the task becomes its root, which only the file item accepts.
+bool TaskTree::_normalize_palette_drop(TreeItem *p_item, int p_section, int &r_to_pos, Ref<BTTask> &r_to_task) const {
+	if (_is_file_item(p_item)) {
+		r_to_task.unref();
+		r_to_pos = -1;
+		return p_section == 0 && bt.is_valid() && bt->get_root_task().is_null();
+	}
+	Ref<BTTask> target = p_item->get_metadata(0);
+	if (target.is_null()) {
+		return false;
+	}
+	switch (p_section) {
+		case 0: {
+			r_to_task = target;
+			r_to_pos = target->get_child_count();
+		} break;
+		case -1: {
+			r_to_task = target->get_parent();
+			r_to_pos = target->get_index();
+		} break;
+		case 1: {
+			if (p_item->get_child_count() > 0 && !p_item->is_collapsed()) {
+				r_to_task = target;
+				r_to_pos = 0;
+			} else {
+				r_to_task = target->get_parent();
+				r_to_pos = target->get_index() + 1;
+			}
+		} break;
+		default:
+			return false;
+	}
+	return r_to_task.is_valid(); // Nothing goes beside the root task.
+}
+
 void TaskTree::_draw_probability(Object *item_obj, Rect2 rect) {
 	TreeItem *item = Object::cast_to<TreeItem>(item_obj);
 	if (!item) {
@@ -561,6 +647,25 @@ void TaskTree::_do_update_theme_item_cache() {
 	theme_cache.probability_bg.instantiate();
 	theme_cache.probability_bg->set_bg_color(get_theme_color(LW_NAME(accent_color), LW_NAME(Editor)) * Color(1, 1, 1, 0.25));
 	theme_cache.probability_bg->set_corner_radius_all(12.0 * EDSCALE);
+
+	// The tree body sits a step darker than the editor panel around it, as the FileSystem
+	// dock's tree does, so the task hierarchy reads as content rather than as chrome. Built
+	// from the theme's own Tree panel so its margins and borders stay the theme's.
+	Ref<StyleBox> tree_panel = get_theme_stylebox(LW_NAME(panel), LW_NAME(Tree));
+	Ref<StyleBoxFlat> dark_panel;
+	if (Object::cast_to<StyleBoxFlat>(tree_panel.ptr())) {
+		dark_panel = tree_panel->duplicate();
+	} else {
+		dark_panel.instantiate();
+		if (tree_panel.is_valid()) {
+			for (int side = 0; side < 4; side++) {
+				dark_panel->set_content_margin(Side(side), tree_panel->get_content_margin(Side(side)));
+			}
+		}
+	}
+	dark_panel->set_draw_center(true);
+	dark_panel->set_bg_color(get_theme_color(LW_NAME(dark_color_2), LW_NAME(Editor)));
+	ADD_STYLEBOX_OVERRIDE(tree, LW_NAME(panel), dark_panel);
 }
 
 void TaskTree::_notification(int p_what) {
@@ -600,6 +705,10 @@ void TaskTree::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("task_selected"));
 	ADD_SIGNAL(MethodInfo("task_activated"));
 	ADD_SIGNAL(MethodInfo("probability_clicked"));
+	ADD_SIGNAL(MethodInfo("behavior_tree_selected", PropertyInfo(Variant::OBJECT, "behavior_tree", PROPERTY_HINT_RESOURCE_TYPE, "BehaviorTree")));
+	ADD_SIGNAL(MethodInfo("palette_task_dropped", PropertyInfo(Variant::STRING, "task_meta"),
+			PropertyInfo(Variant::OBJECT, "to_task", PROPERTY_HINT_RESOURCE_TYPE, "BTTask"),
+			PropertyInfo(Variant::INT, "to_pos")));
 	ADD_SIGNAL(MethodInfo("tasks_dragged", PropertyInfo(Variant::ARRAY, "tasks", PROPERTY_HINT_ARRAY_TYPE, RESOURCE_TYPE_HINT("BTTask")),
 			PropertyInfo(Variant::OBJECT, "to_task", PROPERTY_HINT_RESOURCE_TYPE, "BTTask"),
 			PropertyInfo(Variant::INT, "type")));

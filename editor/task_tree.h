@@ -84,6 +84,12 @@ private:
 	bool _can_drop_data_fw(const Point2 &p_point, const Variant &p_data) const;
 	void _drop_data_fw(const Point2 &p_point, const Variant &p_data);
 	void _normalize_drop(TreeItem *item, int type, int &to_pos, Ref<BTTask> &to_task) const;
+	bool _normalize_palette_drop(TreeItem *p_item, int p_section, int &r_to_pos, Ref<BTTask> &r_to_task) const;
+
+	// The tree's root item stands for the behavior tree file itself; the root task hangs
+	// under it. Its metadata is empty, so every lookup that reads a task off an item skips it.
+	TreeItem *_create_file_item();
+	_FORCE_INLINE_ bool _is_file_item(const TreeItem *p_item) const { return p_item != nullptr && p_item->get_parent() == nullptr; }
 
 	void _draw_probability(Object *item_obj, Rect2 rect);
 

@@ -193,6 +193,27 @@ void LimboAIEditor::_add_task_by_class_or_path(const String &p_class_or_path) {
 	_add_task(_create_task_by_class_or_path(p_class_or_path), as_sibling);
 }
 
+void LimboAIEditor::_on_palette_task_dropped(const String &p_task_meta, Ref<BTTask> p_to_task, int p_to_pos) {
+	Ref<BehaviorTree> bt = task_tree->get_bt();
+	if (bt.is_null()) {
+		return;
+	}
+	Ref<BTTask> task = _create_task_by_class_or_path(p_task_meta);
+	ERR_FAIL_COND(task.is_null());
+
+	EditorUndoRedoManager *undo_redo = _new_undo_redo_action(TTR("Add BT Task"));
+	if (p_to_task.is_null()) {
+		// Dropped on the file item of an empty tree.
+		ERR_FAIL_COND(bt->get_root_task().is_valid());
+		undo_redo->add_do_method(bt.ptr(), LW_NAME(set_root_task), task);
+		undo_redo->add_undo_method(bt.ptr(), LW_NAME(set_root_task), bt->get_root_task());
+	} else {
+		undo_redo->add_do_method(p_to_task.ptr(), LW_NAME(add_child_at_index), task, p_to_pos);
+		undo_redo->add_undo_method(p_to_task.ptr(), LW_NAME(remove_child), task);
+	}
+	_commit_action_with_update(undo_redo);
+}
+
 void LimboAIEditor::_remove_task(const Ref<BTTask> &p_task) {
 	ERR_FAIL_COND(p_task.is_null());
 	ERR_FAIL_COND(task_tree->get_bt().is_null());
@@ -1120,6 +1141,12 @@ void LimboAIEditor::_on_tree_task_selected(const Ref<BTTask> &p_task) {
 	EditorInterface::get_singleton()->edit_resource(p_task);
 }
 
+void LimboAIEditor::_on_tree_bt_selected(const Ref<BehaviorTree> &p_behavior_tree) {
+	if (p_behavior_tree.is_valid()) {
+		EditorInterface::get_singleton()->edit_resource(p_behavior_tree);
+	}
+}
+
 void LimboAIEditor::_on_tree_task_activated() {
 	Ref<BTTask> selected = task_tree->get_selected();
 	ERR_FAIL_COND(selected.is_null());
@@ -1753,6 +1780,8 @@ void LimboAIEditor::_notification(int p_what) {
 			task_tree->connect("rmb_pressed", callable_mp(this, &LimboAIEditor::_on_tree_rmb));
 			task_tree->connect("task_selected", callable_mp(this, &LimboAIEditor::_on_tree_task_selected));
 			task_tree->connect("tasks_dragged", callable_mp(this, &LimboAIEditor::_on_tasks_dragged));
+			task_tree->connect("palette_task_dropped", callable_mp(this, &LimboAIEditor::_on_palette_task_dropped));
+			task_tree->connect("behavior_tree_selected", callable_mp(this, &LimboAIEditor::_on_tree_bt_selected));
 			task_tree->connect("task_activated", callable_mp(this, &LimboAIEditor::_on_tree_task_activated));
 			task_tree->connect("probability_clicked", callable_mp(this, &LimboAIEditor::_action_selected).bind(ACTION_EDIT_PROBABILITY));
 			task_tree->connect("visibility_changed", callable_mp(this, &LimboAIEditor::_on_visibility_changed));

@@ -25,216 +25,113 @@
 
 #ifdef LIMBOAI_MODULE
 #include "core/io/config_file.h"
+#include "core/io/file_access.h"
 #include "editor/doc/editor_help.h"
+#include "editor/docks/filesystem_dock.h"
 #include "editor/editor_node.h"
 #include "scene/gui/check_box.h"
 #include "scene/gui/label.h"
 #include "scene/gui/popup_menu.h"
+#include "scene/gui/scroll_bar.h"
+#include "scene/gui/texture_rect.h"
 #endif // LIMBO_MODULE
 
 #ifdef LIMBOAI_GDEXTENSION
 #include <godot_cpp/classes/button_group.hpp>
 #include <godot_cpp/classes/check_box.hpp>
 #include <godot_cpp/classes/config_file.hpp>
+#include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/file_system_dock.hpp>
 #include <godot_cpp/classes/font.hpp>
 #include <godot_cpp/classes/h_box_container.hpp>
 #include <godot_cpp/classes/input_event_mouse_button.hpp>
+#include <godot_cpp/classes/input_event_mouse_motion.hpp>
 #include <godot_cpp/classes/label.hpp>
 #include <godot_cpp/classes/popup_menu.hpp>
 #include <godot_cpp/classes/style_box.hpp>
+#include <godot_cpp/classes/style_box_flat.hpp>
+#include <godot_cpp/classes/texture_rect.hpp>
+#include <godot_cpp/classes/v_scroll_bar.hpp>
 using namespace godot;
+
+#include "../gen/task_briefs.gen.h"
 #endif // LIMBOAI_GDEXTENSION
 
-//**** TaskButton
+namespace {
 
-void TaskButton::_bind_methods() {
+// Metadata prefix of a folder item. A task item's metadata is its task meta, a class name or a
+// res:// path, which never begins with it.
+const char *FOLDER_PREFIX = "#folder:";
+
+bool _is_folder(TreeItem *p_item) {
+	return String(p_item->get_metadata(0)).begins_with(FOLDER_PREFIX);
 }
 
-Control *TaskButton::_do_make_tooltip() const {
-#ifdef LIMBOAI_MODULE
-	String help_symbol;
-	bool is_resource = task_meta.begins_with("res://");
-
-	if (is_resource) {
-		help_symbol = "class|\"" + task_meta.lstrip("res://") + "\"|";
-	} else {
-		help_symbol = "class|" + task_meta + "|";
-	}
-
-	String desc = _module_get_help_description(task_meta);
-	if (desc.is_empty() && is_resource) {
-		// ! HACK: Force documentation parsing.
-		Ref<Script> s = ResourceLoader::load(task_meta);
-		if (s.is_valid()) {
-			Vector<DocData::ClassDoc> docs = s->get_documentation();
-			for (int i = 0; i < docs.size(); i++) {
-				const DocData::ClassDoc &doc = docs.get(i);
-				EditorHelp::get_doc_data()->add_doc(doc);
-			}
-			desc = _module_get_help_description(task_meta);
-		}
-	}
-	if (desc.is_empty()) {
-		desc = "[i]" + TTR("No description.") + "[/i]";
-	}
-	return EditorHelpBitTooltip::make_tooltip(const_cast<TaskButton *>(this), help_symbol, desc);
-#endif // LIMBOAI_MODULE
+String _folder_key(TreeItem *p_item) {
+	return String(p_item->get_metadata(0)).trim_prefix(FOLDER_PREFIX);
+}
 
 #ifdef LIMBOAI_GDEXTENSION
-	// TODO: When we figure out how to retrieve documentation in GDEXTENSION, should add a tooltip control here.
-	return memnew(Control); // Make the standard tooltip invisible
+// Core task descriptions, generated from doc_classes/*.xml at build time (gen_task_briefs.py):
+// an extension cannot read EditorHelp back. Maps a class name to its LIMBO_TASK_BRIEFS row.
+const HashMap<String, int> &_core_task_rows() {
+	static HashMap<String, int> rows;
+	if (rows.is_empty()) {
+		for (int i = 0; i < int(sizeof(LIMBO_TASK_BRIEFS) / sizeof(LIMBO_TASK_BRIEFS[0])); i++) {
+			rows.insert(String::utf8(LIMBO_TASK_BRIEFS[i][0]), i);
+		}
+	}
+	return rows;
+}
 #endif // LIMBOAI_GDEXTENSION
-}
 
-#ifdef LIMBOAI_MODULE
-
-String TaskButton::_module_get_help_description(const String &p_class_or_script_path) const {
-	String descr;
-
-	DocTools *dd = EditorHelp::get_doc_data();
-	HashMap<String, DocData::ClassDoc>::Iterator E;
-
-	if (p_class_or_script_path.begins_with("res://")) {
-		// Try to find by script path.
-		E = dd->class_list.find(vformat("\"%s\"", p_class_or_script_path.trim_prefix("res://")));
-		if (!E) {
-			// Try to guess global script class from filename.
-			String maybe_class_name = p_class_or_script_path.get_file().get_basename().to_pascal_case();
-			E = dd->class_list.find(maybe_class_name);
-		}
-	} else {
-		// Try to find core class or global class.
-		E = dd->class_list.find(p_class_or_script_path);
-	}
-
-	if (E) {
-		if (E->value.description.is_empty()) {
-			descr = DTR(E->value.brief_description);
-		} else {
-			descr = DTR(E->value.description);
+// The class documentation of a task script: the `##` lines after its header lines (@tool,
+// extends, class_name, plain comments), kept line for line.
+String _script_doc_comment(const String &p_path) {
+	PackedStringArray lines = FileAccess::get_file_as_string(p_path).split("\n");
+	PackedStringArray doc;
+	for (int i = 0; i < lines.size(); i++) {
+		String line = lines[i].strip_edges();
+		if (line.begins_with("##")) {
+			line = line.substr(2);
+			if (line.begins_with(" ")) {
+				line = line.substr(1);
+			}
+			if (!line.begins_with("@tutorial")) {
+				doc.push_back(line);
+			}
+		} else if (!doc.is_empty()) {
+			break;
+		} else if (!(line.is_empty() || line.begins_with("@") || line.begins_with("extends") || line.begins_with("class_name") || line.begins_with("#"))) {
+			break;
 		}
 	}
-
-	// TODO: Documentation tooltips are only available in the module variant. Find a way to show em in GDExtension.
-
-	return descr;
-}
-
-#endif // LIMBOAI_MODULE
-
-TaskButton::TaskButton() {
-	set_focus_mode(FOCUS_NONE);
-}
-
-//**** TaskButton ^
-
-//**** TaskPaletteSection
-
-void TaskPaletteSection::_on_task_button_pressed(const String &p_task) {
-	emit_signal(LW_NAME(task_button_pressed), p_task);
-}
-
-void TaskPaletteSection::_on_task_button_gui_input(const Ref<InputEvent> &p_event, const String &p_task) {
-	if (!p_event->is_pressed()) {
-		return;
+	while (!doc.is_empty() && doc[doc.size() - 1].is_empty()) {
+		doc.remove_at(doc.size() - 1);
 	}
-
-	Ref<InputEventMouseButton> mb = p_event;
-	if (mb.is_valid() && mb->get_button_index() == LW_MBTN(RIGHT)) {
-		emit_signal(LW_NAME(task_button_rmb), p_task);
-	}
+	return String("\n").join(doc);
 }
 
-void TaskPaletteSection::_on_header_pressed() {
-	set_collapsed(!is_collapsed());
-}
-
-void TaskPaletteSection::set_filter(String p_filter_text) {
-	int num_hidden = 0;
-	if (p_filter_text.is_empty()) {
-		for (int i = 0; i < tasks_container->get_child_count(); i++) {
-			Object::cast_to<Button>(tasks_container->get_child(i))->show();
-		}
-		set_visible(tasks_container->get_child_count() > 0);
-	} else {
-		for (int i = 0; i < tasks_container->get_child_count(); i++) {
-			Button *btn = Object::cast_to<Button>(tasks_container->get_child(i));
-			btn->set_visible(btn->get_text().findn(p_filter_text) != -1);
-			num_hidden += !btn->is_visible();
-		}
-		set_visible(num_hidden < tasks_container->get_child_count());
-	}
-}
-
-void TaskPaletteSection::add_task_button(const String &p_name, const Ref<Texture> &icon, const String &p_meta) {
-	TaskButton *btn = memnew(TaskButton);
-	btn->set_text(p_name);
-	btn->set_button_icon(icon);
-	btn->set_tooltip_text("dummy_text"); // Force tooltip to be shown.
-	btn->set_task_meta(p_meta);
-	btn->add_theme_constant_override(LW_NAME(icon_max_width), 16 * EDSCALE); // Force user icons to  be of the proper size.
-	btn->connect(LW_NAME(pressed), callable_mp(this, &TaskPaletteSection::_on_task_button_pressed).bind(p_meta));
-	btn->connect(LW_NAME(gui_input), callable_mp(this, &TaskPaletteSection::_on_task_button_gui_input).bind(p_meta));
-	tasks_container->add_child(btn);
-}
-
-void TaskPaletteSection::set_collapsed(bool p_collapsed) {
-	tasks_container->set_visible(!p_collapsed);
-	section_header->set_button_icon((p_collapsed ? theme_cache.arrow_right_icon : theme_cache.arrow_down_icon));
-}
-
-bool TaskPaletteSection::is_collapsed() const {
-	return !tasks_container->is_visible();
-}
-
-void TaskPaletteSection::_do_update_theme_item_cache() {
-	theme_cache.arrow_down_icon = get_theme_icon(LW_NAME(GuiTreeArrowDown), LW_NAME(EditorIcons));
-	theme_cache.arrow_right_icon = get_theme_icon(LW_NAME(GuiTreeArrowRight), LW_NAME(EditorIcons));
-}
-
-void TaskPaletteSection::_notification(int p_what) {
-	switch (p_what) {
-		case NOTIFICATION_READY: {
-			section_header->connect(LW_NAME(pressed), callable_mp(this, &TaskPaletteSection::_on_header_pressed));
-		} break;
-		case NOTIFICATION_THEME_CHANGED: {
-			_do_update_theme_item_cache();
-			section_header->set_button_icon((is_collapsed() ? theme_cache.arrow_right_icon : theme_cache.arrow_down_icon));
-			section_header->add_theme_font_override(LW_NAME(font), get_theme_font(LW_NAME(bold), LW_NAME(EditorFonts)));
-		} break;
-	}
-}
-
-void TaskPaletteSection::_bind_methods() {
-	ADD_SIGNAL(MethodInfo("task_button_pressed"));
-	ADD_SIGNAL(MethodInfo("task_button_rmb"));
-}
-
-TaskPaletteSection::TaskPaletteSection() {
-	section_header = memnew(Button);
-	add_child(section_header);
-	section_header->set_focus_mode(FOCUS_NONE);
-
-	tasks_container = memnew(HFlowContainer);
-	add_child(tasks_container);
-}
-
-TaskPaletteSection::~TaskPaletteSection() {
-}
-
-//**** TaskPaletteSection ^
+} // namespace
 
 //**** TaskPalette
 
 void TaskPalette::_menu_action_selected(int p_id) {
 	ERR_FAIL_COND(context_task.is_empty());
 	switch (p_id) {
+		case MENU_ADD_TASK: {
+			emit_signal(LW_NAME(task_selected), context_task);
+		} break;
 		case MENU_OPEN_DOC: {
 			LimboUtility::get_singleton()->open_doc_class(context_task);
 		} break;
 		case MENU_EDIT_SCRIPT: {
 			ERR_FAIL_COND(!context_task.begins_with("res://"));
 			EDIT_SCRIPT(context_task);
+		} break;
+		case MENU_SHOW_IN_FILESYSTEM: {
+			ERR_FAIL_COND(!context_task.begins_with("res://"));
+			EditorInterface::get_singleton()->get_file_system_dock()->navigate_to_path(context_task);
 		} break;
 		case MENU_FAVORITE: {
 			PackedStringArray favorite_tasks = GLOBAL_GET("limbo_ai/behavior_tree/favorite_tasks");
@@ -253,8 +150,379 @@ void TaskPalette::_menu_action_selected(int p_id) {
 	}
 }
 
-void TaskPalette::_on_task_button_pressed(const String &p_task) {
-	emit_signal(LW_NAME(task_selected), p_task);
+void TaskPalette::_on_item_mouse_selected(const Vector2 &p_pos, MouseButton p_button_index) {
+	TreeItem *item = tree->get_selected();
+	if (item == nullptr) {
+		return;
+	}
+	if (_is_folder(item)) {
+		return; // Folders open and close on their arrow only.
+	}
+	// In the palette a task is added from its context menu or by dragging it onto the task
+	// tree, so a stray click never edits the tree. The change-type dialog is a picker: there a
+	// click is the choice.
+	String task_meta = item->get_metadata(0);
+	if (p_button_index == LW_MBTN(LEFT) && dialog_mode) {
+		emit_signal(LW_NAME(task_selected), task_meta);
+	} else if (p_button_index == LW_MBTN(RIGHT)) {
+		_on_task_button_rmb(task_meta);
+	}
+}
+
+Variant TaskPalette::_get_drag_data_fw(const Point2 &p_point) {
+	if (dialog_mode) {
+		return Variant();
+	}
+	TreeItem *item = tree->get_item_at_position(p_point);
+	if (item == nullptr || _is_folder(item)) {
+		return Variant();
+	}
+
+	HBoxContainer *preview = memnew(HBoxContainer);
+	TextureRect *icon = memnew(TextureRect);
+	icon->set_custom_minimum_size(Size2(16, 16) * EDSCALE);
+	icon->set_stretch_mode(TextureRect::STRETCH_KEEP_ASPECT_CENTERED);
+	icon->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
+	icon->set_texture(item->get_icon(0));
+	preview->add_child(icon);
+	Label *label = memnew(Label);
+	label->set_text(item->get_text(0));
+	preview->add_child(label);
+	set_drag_preview(preview);
+
+	// TaskTree takes this kind on drop and creates the task where it lands.
+	Dictionary drag_data;
+	drag_data["type"] = "palette_task";
+	drag_data["task_meta"] = item->get_metadata(0);
+	return drag_data;
+}
+
+void TaskPalette::_update_sticky_headers() {
+	sticky_items.clear();
+	TreeItem *root = tree->get_root();
+	Ref<StyleBox> panel = tree->get_theme_stylebox(LW_NAME(panel));
+	sticky_content_ofs = panel.is_valid() ? Vector2(panel->get_margin(SIDE_LEFT), panel->get_margin(SIDE_TOP)) : Vector2();
+
+	TreeItem *first = root != nullptr ? root->get_first_child() : nullptr;
+	sticky_row_height = first != nullptr ? tree->get_item_area_rect(first).size.y : 0.0;
+	float scroll = tree->get_scroll().y;
+	// Where a row stands now, in tree coordinates (see _row_content_y()).
+	auto row_top = [&](TreeItem *p_item) { return sticky_content_ofs.y + _row_content_y(p_item) - scroll; };
+
+	// One slot per level (the roots, then their categories). A folder takes its level's slot
+	// once its own row has gone up under that slot, and keeps it while some of its contents
+	// are still showing below the slot. So a pinned folder never stands over its own row, and
+	// a folder whose row is still in view is left to that row.
+	TreeItem *parent = root;
+	for (int level = 0; parent != nullptr && sticky_row_height > 0.0 && level < 2; level++) {
+		float slot_top = sticky_content_ofs.y + level * sticky_row_height;
+		TreeItem *pinned = nullptr;
+		for (TreeItem *folder = parent->get_first_child(); folder != nullptr; folder = folder->get_next()) {
+			if (!folder->is_visible() || !_is_folder(folder)) {
+				continue;
+			}
+			if (row_top(folder) >= slot_top) {
+				break; // This and every later sibling is still in view.
+			}
+			if (folder->is_collapsed()) {
+				continue;
+			}
+			// The last row the folder shows: walk down its last open, visible children.
+			TreeItem *last = folder;
+			while (!last->is_collapsed()) {
+				TreeItem *child = nullptr;
+				for (int i = last->get_child_count() - 1; i >= 0; i--) {
+					if (last->get_child(i)->is_visible()) {
+						child = last->get_child(i);
+						break;
+					}
+				}
+				if (child == nullptr) {
+					break;
+				}
+				last = child;
+			}
+			if (row_top(last) + sticky_row_height > slot_top + sticky_row_height) {
+				pinned = folder;
+			}
+		}
+		if (pinned == nullptr) {
+			break;
+		}
+		sticky_items.push_back(pinned);
+		parent = pinned;
+	}
+
+	if (sticky_items.is_empty()) {
+		sticky_hovered = -1;
+		sticky_overlay->hide();
+		return;
+	}
+	if (sticky_hovered >= sticky_items.size()) {
+		sticky_hovered = -1;
+	}
+
+	// Edge to edge, scrollbar included, and from the tree's very top: Tree draws rows into its
+	// panel margin as well (it only clips there for column titles), so a stack starting at the
+	// margin leaves a strip of scrolled rows showing above it.
+	sticky_overlay->set_position(Vector2());
+	sticky_overlay->set_size(Size2(tree->get_size().x, sticky_content_ofs.y + sticky_row_height * sticky_items.size()));
+	sticky_overlay->show();
+	sticky_overlay->queue_redraw();
+}
+
+// A row's top in content space: 0 for the first row, growing down, whatever the scroll.
+// Measured against the first row rather than read off get_item_area_rect() alone, because
+// Tree folds the scroll into that rect only when it next draws: called from the scrollbar's
+// value_changed, the rect still stands where the previous scroll put it, which a wheel step
+// of several rows (or a jump back to the top) makes plainly wrong.
+float TaskPalette::_row_content_y(TreeItem *p_item) const {
+	TreeItem *first = tree->get_root() != nullptr ? tree->get_root()->get_first_child() : nullptr;
+	if (first == nullptr) {
+		return 0.0;
+	}
+	return tree->get_item_area_rect(p_item).position.y - tree->get_item_area_rect(first).position.y;
+}
+
+int TaskPalette::_sticky_row_at(float p_y) const {
+	if (sticky_row_height <= 0.0) {
+		return -1;
+	}
+	int idx = int(MAX(p_y - sticky_content_ofs.y, 0.0f) / sticky_row_height);
+	return idx < sticky_items.size() ? idx : -1;
+}
+
+void TaskPalette::_draw_sticky_headers() {
+	if (sticky_items.is_empty()) {
+		return;
+	}
+	TreeItem *root = tree->get_root();
+	Ref<Font> font = tree->get_theme_font(LW_NAME(font));
+	int font_size = tree->get_theme_font_size(LW_NAME(font_size));
+	Color font_color = tree->get_theme_color(LW_NAME(font_color));
+	int item_margin = tree->get_theme_constant("item_margin");
+	int inner_margin = tree->get_theme_constant("inner_item_margin_left");
+	int h_separation = tree->get_theme_constant(LW_NAME(h_separation));
+	Ref<Texture2D> arrow = tree->get_theme_icon("arrow");
+
+	// The palette's own background, the gray behind the filter row above the tree: lighter than
+	// the dark tree, so the pinned rows read as a header and not as rows that stopped
+	// scrolling. Opaque, so the scrolled rows never show through.
+	Color bg_color = get_theme_color("base_color", LW_NAME(Editor));
+	Ref<StyleBoxFlat> own_panel = get_theme_stylebox(LW_NAME(panel));
+	if (own_panel.is_valid() && own_panel->is_draw_center_enabled() && own_panel->get_bg_color().a > 0.0) {
+		bg_color = bg_color.blend(own_panel->get_bg_color());
+	}
+	bg_color.a = 1.0;
+
+	float width = sticky_overlay->get_size().x;
+	float rh = sticky_row_height;
+	float bottom = sticky_content_ofs.y + rh * sticky_items.size();
+	sticky_overlay->draw_rect(Rect2(0, 0, width, bottom), bg_color);
+	for (int i = 0; i < sticky_items.size(); i++) {
+		TreeItem *item = sticky_items[i];
+		int depth = 0;
+		for (TreeItem *p = item->get_parent(); p != nullptr && p != root; p = p->get_parent()) {
+			depth++;
+		}
+		// Laid out the way Tree lays out a row: the arrow at the right of the item margin
+		// for its depth, then the cell with its icon and text.
+		float y = sticky_content_ofs.y + i * rh;
+		float x = sticky_content_ofs.x + depth * item_margin;
+		if (i == sticky_hovered) {
+			// The whole line, edge to edge, as it is a button for the whole line.
+			Ref<StyleBox> hovered = tree->get_theme_stylebox("hovered");
+			if (hovered.is_valid()) {
+				hovered->draw(sticky_overlay->get_canvas_item(), Rect2(0, y, width, rh));
+			}
+		}
+		if (arrow.is_valid()) {
+			sticky_overlay->draw_texture(arrow, Vector2(x + item_margin - arrow->get_width(), y + Math::floor((rh - arrow->get_height()) * 0.5)));
+		}
+		float text_x = x + item_margin + inner_margin;
+		Ref<Texture2D> icon = item->get_icon(0);
+		if (icon.is_valid()) {
+			Size2 icon_size = icon->get_size();
+			int max_w = item->get_icon_max_width(0);
+			if (max_w > 0 && icon_size.x > max_w) {
+				icon_size = Size2(max_w, icon_size.y * max_w / icon_size.x);
+			}
+			sticky_overlay->draw_texture_rect(icon, Rect2(Vector2(text_x, y + Math::floor((rh - icon_size.y) * 0.5)), icon_size), false, item->get_icon_modulate(0));
+			text_x += icon_size.x + h_separation;
+		}
+		if (font.is_valid()) {
+			float ascent = font->get_ascent(font_size);
+			float baseline = y + Math::floor((rh - (ascent + font->get_descent(font_size))) * 0.5 + ascent);
+			sticky_overlay->draw_string(font, Vector2(text_x, baseline), item->get_text(0), HORIZONTAL_ALIGNMENT_LEFT, MAX(width - text_x, 0.0f), font_size, font_color);
+		}
+	}
+
+	// The shade under the pinned rows that FileSystem draws at the top of a scrolled tree.
+	Ref<Texture2D> hint = tree->get_theme_icon("scroll_hint");
+	if (hint.is_valid()) {
+		sticky_overlay->draw_texture_rect(hint, Rect2(0, bottom, width, hint->get_height()), false, tree->get_theme_color("scroll_hint_color"));
+	} else {
+		float h = 8 * EDSCALE;
+		PackedVector2Array points;
+		points.push_back(Vector2(0, bottom));
+		points.push_back(Vector2(width, bottom));
+		points.push_back(Vector2(width, bottom + h));
+		points.push_back(Vector2(0, bottom + h));
+		PackedColorArray colors;
+		Color shade(0, 0, 0, 0.35);
+		colors.push_back(shade);
+		colors.push_back(shade);
+		colors.push_back(Color(0, 0, 0, 0));
+		colors.push_back(Color(0, 0, 0, 0));
+		sticky_overlay->draw_polygon(points, colors);
+	}
+}
+
+void TaskPalette::_on_sticky_gui_input(const Ref<InputEvent> &p_event) {
+	Ref<InputEventMouseMotion> mm = p_event;
+	if (mm.is_valid()) {
+		int idx = _sticky_row_at(mm->get_position().y);
+		if (idx != sticky_hovered) {
+			sticky_hovered = idx;
+			sticky_overlay->queue_redraw();
+		}
+		return;
+	}
+
+	Ref<InputEventMouseButton> mb = p_event;
+	if (mb.is_null() || !mb->is_pressed() || mb->get_button_index() != LW_MBTN(LEFT)) {
+		return;
+	}
+	sticky_overlay->accept_event();
+	int idx = _sticky_row_at(mb->get_position().y);
+	if (idx < 0) {
+		return;
+	}
+	// Scroll the folder's own row to just under the slots its ancestors will hold once it is
+	// up there, so it is shown as a row again rather than pinned.
+	VScrollBar *vsb = nullptr;
+	for (int i = 0; i < tree->get_child_count(true) && vsb == nullptr; i++) {
+		vsb = Object::cast_to<VScrollBar>(tree->get_child(i, true));
+	}
+	if (vsb == nullptr) {
+		return;
+	}
+	vsb->set_value(MAX(_row_content_y(sticky_items[idx]) - idx * sticky_row_height, 0.0f));
+}
+
+void TaskPalette::_on_sticky_mouse_exited() {
+	if (sticky_hovered != -1) {
+		sticky_hovered = -1;
+		sticky_overlay->queue_redraw();
+	}
+}
+
+void TaskPalette::_on_item_collapsed(Object *p_item) {
+	callable_mp(this, &TaskPalette::_update_sticky_headers).call_deferred();
+	if (updating_tree || filtering || dialog_mode) {
+		return;
+	}
+	TreeItem *item = Object::cast_to<TreeItem>(p_item);
+	if (item == nullptr || !_is_folder(item)) {
+		return;
+	}
+	if (item->is_collapsed()) {
+		collapsed_folders.insert(_folder_key(item));
+	} else {
+		collapsed_folders.erase(_folder_key(item));
+	}
+}
+
+TreeItem *TaskPalette::_create_folder(TreeItem *p_parent, const String &p_text, const String &p_key, const Ref<Texture2D> &p_icon) {
+	TreeItem *item = tree->create_item(p_parent);
+	item->set_text(0, p_text);
+	if (p_icon.is_valid()) {
+		item->set_icon(0, p_icon);
+	} else {
+		item->set_icon(0, theme_cache.folder_icon);
+		item->set_icon_modulate(0, theme_cache.folder_icon_color);
+	}
+	item->set_icon_max_width(0, 16 * EDSCALE);
+	item->set_metadata(0, String(FOLDER_PREFIX) + p_key);
+	item->set_collapsed(!dialog_mode && collapsed_folders.has(p_key));
+	return item;
+}
+
+String TaskPalette::_get_task_description(const String &p_task_meta, bool p_full) const {
+	String desc;
+	if (p_task_meta.begins_with("res://")) {
+		desc = _script_doc_comment(p_task_meta);
+	} else {
+#ifdef LIMBOAI_GDEXTENSION
+		const HashMap<String, int> &rows = _core_task_rows();
+		if (rows.has(p_task_meta)) {
+			desc = String::utf8(LIMBO_TASK_BRIEFS[rows.get(p_task_meta)][p_full ? 2 : 1]);
+		}
+#endif // LIMBOAI_GDEXTENSION
+#ifdef LIMBOAI_MODULE
+		HashMap<String, DocData::ClassDoc>::ConstIterator E = EditorHelp::get_doc_data()->class_list.find(p_task_meta);
+		if (E) {
+			desc = DTR(p_full && !E->value.description.is_empty() ? E->value.description : E->value.brief_description);
+		}
+#endif // LIMBOAI_MODULE
+	}
+	if (desc.is_empty()) {
+		desc = TTR("No description.");
+	}
+	return desc;
+}
+
+void TaskPalette::_update_description() {
+	description_text->clear();
+	TreeItem *item = tree->get_selected();
+	Color dim_color = get_theme_color(LW_NAME(disabled_font_color), LW_NAME(Editor));
+	if (item == nullptr || _is_folder(item)) {
+		description_text->push_color(dim_color);
+		description_text->add_text(TTR("Select a task to see its description."));
+		description_text->pop();
+		return;
+	}
+	String task_meta = item->get_metadata(0);
+	int icon_size = 16 * EDSCALE;
+	description_text->add_image(item->get_icon(0), icon_size, icon_size);
+	description_text->add_text(" ");
+	description_text->push_font(get_theme_font(LW_NAME(bold), LW_NAME(EditorFonts)));
+	description_text->add_text(item->get_text(0));
+	description_text->pop();
+	description_text->add_text("\n\n" + _get_task_description(task_meta, true));
+	if (task_meta.begins_with("res://")) {
+		description_text->add_text("\n\n");
+		description_text->push_color(dim_color);
+		description_text->add_text(task_meta);
+		description_text->pop();
+	}
+}
+
+void TaskPalette::_update_description_visibility() {
+	// Below this the tree would be squeezed to make room; the tooltip still carries the brief.
+	const float DESCRIPTION_MIN_WIDTH = 460.0;
+	description_pane->set_visible(!dialog_mode && get_size().x >= DESCRIPTION_MIN_WIDTH * EDSCALE);
+}
+
+void TaskPalette::_load_collapsed_folders() {
+	if (collapsed_folders_loaded || dialog_mode) {
+		return;
+	}
+	collapsed_folders_loaded = true;
+	Ref<ConfigFile> cf;
+	cf.instantiate();
+	if (cf->load(LAYOUT_CONFIG_FILE()) != OK) {
+		return;
+	}
+	Variant value = cf->get_value("LimboAI", "task_palette_collapsed_folders", Array());
+	if (VARIANT_IS_ARRAY(value)) {
+		Array arr = value;
+		for (int i = 0; i < arr.size(); i++) {
+			if (arr[i].get_type() == Variant::STRING) {
+				collapsed_folders.insert(arr[i]);
+			}
+		}
+	}
 }
 
 void TaskPalette::_on_task_button_rmb(const String &p_task) {
@@ -267,8 +535,14 @@ void TaskPalette::_on_task_button_rmb(const String &p_task) {
 	context_task = p_task;
 	menu->clear();
 
+	menu->add_icon_item(get_theme_icon("Add", LW_NAME(EditorIcons)), TTR("Add Task"), MENU_ADD_TASK);
+	menu->add_separator();
+	// Only a script task has a file; the built-in ones keep the items, greyed out.
+	bool is_script = context_task.begins_with("res://");
 	menu->add_icon_item(theme_cache.edit_script_icon, TTR("Edit Script"), MENU_EDIT_SCRIPT);
-	menu->set_item_disabled(MENU_EDIT_SCRIPT, !context_task.begins_with("res://"));
+	menu->set_item_disabled(menu->get_item_index(MENU_EDIT_SCRIPT), !is_script);
+	menu->add_icon_item(get_theme_icon("ShowInFileSystem", LW_NAME(EditorIcons)), TTR("Show in FileSystem"), MENU_SHOW_IN_FILESYSTEM);
+	menu->set_item_disabled(menu->get_item_index(MENU_SHOW_IN_FILESYSTEM), !is_script);
 	menu->add_icon_item(theme_cache.open_doc_icon, TTR("Open Documentation"), MENU_OPEN_DOC);
 
 	menu->add_separator();
@@ -285,11 +559,32 @@ void TaskPalette::_on_task_button_rmb(const String &p_task) {
 }
 
 void TaskPalette::_apply_filter(const String &p_text) {
-	for (int i = 0; i < sections->get_child_count(); i++) {
-		TaskPaletteSection *sec = Object::cast_to<TaskPaletteSection>(sections->get_child(i));
-		ERR_FAIL_NULL(sec);
-		sec->set_filter(p_text);
+	TreeItem *root = tree->get_root();
+	if (root == nullptr) {
+		return;
 	}
+	// Folders with a match are opened while filtering; clearing the filter puts back what the
+	// user had collapsed.
+	filtering = !p_text.is_empty();
+	updating_tree = true;
+	for (TreeItem *group = root->get_first_child(); group != nullptr; group = group->get_next()) {
+		int group_matches = 0;
+		for (TreeItem *folder = group->get_first_child(); folder != nullptr; folder = folder->get_next()) {
+			int matches = 0;
+			for (TreeItem *task = folder->get_first_child(); task != nullptr; task = task->get_next()) {
+				bool match = !filtering || task->get_text(0).findn(p_text) != -1;
+				task->set_visible(match);
+				matches += match;
+			}
+			folder->set_visible(matches > 0);
+			folder->set_collapsed(!filtering && !dialog_mode && collapsed_folders.has(_folder_key(folder)));
+			group_matches += matches;
+		}
+		group->set_visible(group_matches > 0);
+		group->set_collapsed(!filtering && !dialog_mode && collapsed_folders.has(_folder_key(group)));
+	}
+	updating_tree = false;
+	callable_mp(this, &TaskPalette::_update_sticky_headers).call_deferred();
 }
 
 void TaskPalette::_update_filter_popup() {
@@ -420,79 +715,64 @@ void TaskPalette::_update_filter_button() {
 }
 
 void TaskPalette::refresh() {
-	HashSet<String> collapsed_sections;
-	if (sections->get_child_count() == 0) {
-		// Restore collapsed state from config.
-		Ref<ConfigFile> cf;
-		cf.instantiate();
-		String conf_path = LAYOUT_CONFIG_FILE();
-		if (cf->load(conf_path) == OK) {
-			Variant value = cf->get_value("LimboAI", "task_palette_collapsed_sections", Array());
-			if (VARIANT_IS_ARRAY(value)) {
-				Array arr = value;
-				for (int i = 0; i < arr.size(); i++) {
-					if (arr[i].get_type() == Variant::STRING) {
-						collapsed_sections.insert(arr[i]);
-					}
-				}
-			}
-		}
-	} else {
-		for (int i = 0; i < sections->get_child_count(); i++) {
-			TaskPaletteSection *sec = Object::cast_to<TaskPaletteSection>(sections->get_child(i));
-			ERR_FAIL_NULL(sec);
-			if (sec->is_collapsed()) {
-				collapsed_sections.insert(sec->get_category_name());
-			}
-			sections->get_child(i)->queue_free();
-		}
-	}
+	_load_collapsed_folders();
 
 	LimboTaskDB::scan_user_tasks();
 	List<String> categories = LimboTaskDB::get_categories();
 	categories.sort();
 
-	for (String cat : categories) {
-		if (filter_settings.category_filter != FilterSettings::CATEGORY_ALL && filter_settings.excluded_categories.has(cat)) {
+	updating_tree = true;
+	sticky_items.clear();
+	tree->clear();
+	TreeItem *root = tree->create_item();
+
+	// Two passes over the same categories: built-in tasks under "LimboAI", then the scripts of
+	// user_task_dirs under "Project". A root or folder is created only once a task lands in it.
+	for (int pass = 0; pass < 2; pass++) {
+		bool user_pass = pass == 1;
+		if ((user_pass && filter_settings.type_filter == FilterSettings::TYPE_CORE) ||
+				(!user_pass && filter_settings.type_filter == FilterSettings::TYPE_USER)) {
 			continue;
 		}
-
-		List<String> tasks = LimboTaskDB::get_tasks_in_category(cat);
-		if (tasks.size() == 0) {
-			continue;
-		}
-
-		TaskPaletteSection *sec = memnew(TaskPaletteSection());
-		sec->set_category_name(cat);
-		for (const String &task_meta : tasks) {
-			Ref<Texture2D> icon = LimboUtility::get_singleton()->get_task_icon(task_meta);
-
-			String tname;
-
-			if (task_meta.begins_with("res:")) {
-				if (filter_settings.type_filter == FilterSettings::TYPE_CORE) {
-					continue;
-				}
-				tname = task_meta.get_file().get_basename().trim_prefix("BT").to_pascal_case();
-			} else {
-				if (filter_settings.type_filter == FilterSettings::TYPE_USER) {
-					continue;
-				}
-				tname = task_meta.trim_prefix("BT");
+		TreeItem *group = nullptr;
+		for (const String &cat : categories) {
+			if (filter_settings.category_filter != FilterSettings::CATEGORY_ALL && filter_settings.excluded_categories.has(cat)) {
+				continue;
 			}
+			TreeItem *folder = nullptr;
+			for (const String &task_meta : LimboTaskDB::get_tasks_in_category(cat)) {
+				if (task_meta.begins_with("res:") != user_pass) {
+					continue;
+				}
+				if (group == nullptr) {
+					group = user_pass
+							? _create_folder(root, TTR("Project"), "user", Ref<Texture2D>())
+							: _create_folder(root, "LimboAI", "core", LimboUtility::get_singleton()->get_task_icon("LimboAI"));
+				}
+				if (folder == nullptr) {
+					folder = _create_folder(group, cat, (user_pass ? "user/" : "core/") + cat, Ref<Texture2D>());
+				}
 
-			sec->add_task_button(tname, icon, task_meta);
+				String tname = user_pass
+						? task_meta.get_file().get_basename().trim_prefix("BT").to_pascal_case()
+						: task_meta.trim_prefix("BT");
+				TreeItem *item = tree->create_item(folder);
+				item->set_text(0, tname);
+				item->set_icon(0, LimboUtility::get_singleton()->get_task_icon(task_meta));
+				item->set_icon_max_width(0, 16 * EDSCALE); // Force user icons to be of the proper size.
+				item->set_metadata(0, task_meta);
+				item->set_tooltip_text(0, user_pass ? _get_task_description(task_meta, false) + "\n\n" + task_meta : _get_task_description(task_meta, false));
+			}
 		}
-		sec->set_filter("");
-		sec->connect(LW_NAME(task_button_pressed), callable_mp(this, &TaskPalette::_on_task_button_pressed));
-		sec->connect(LW_NAME(task_button_rmb), callable_mp(this, &TaskPalette::_on_task_button_rmb));
-		sections->add_child(sec);
-		sec->set_collapsed(!dialog_mode && collapsed_sections.has(cat));
 	}
+	updating_tree = false;
+	filtering = false;
 
-	if (!dialog_mode && !filter_edit->get_text().is_empty()) {
+	if (!filter_edit->get_text().is_empty()) {
 		_apply_filter(filter_edit->get_text());
 	}
+	callable_mp(this, &TaskPalette::_update_sticky_headers).call_deferred();
+	_update_description();
 }
 
 void TaskPalette::use_dialog_mode() {
@@ -508,6 +788,28 @@ void TaskPalette::_do_update_theme_item_cache() {
 	theme_cache.remove_from_favorites_icon = get_theme_icon(LW_NAME(NonFavorite), LW_NAME(EditorIcons));
 
 	theme_cache.category_choice_background = get_theme_stylebox(LW_NAME(normal), LW_NAME(LineEdit));
+
+	theme_cache.folder_icon = get_theme_icon("Folder", LW_NAME(EditorIcons));
+	theme_cache.folder_icon_color = get_theme_color("folder_icon_color", "FileDialog");
+
+	// The same darker body TaskTree gives the behavior tree, so both trees read alike. Built
+	// from the theme's own Tree panel so margins and borders stay the theme's.
+	Ref<StyleBox> tree_panel = get_theme_stylebox(LW_NAME(panel), LW_NAME(Tree));
+	Ref<StyleBoxFlat> dark_panel;
+	if (Object::cast_to<StyleBoxFlat>(tree_panel.ptr())) {
+		dark_panel = tree_panel->duplicate();
+	} else {
+		dark_panel.instantiate();
+		if (tree_panel.is_valid()) {
+			for (int side = 0; side < 4; side++) {
+				dark_panel->set_content_margin(Side(side), tree_panel->get_content_margin(Side(side)));
+			}
+		}
+	}
+	dark_panel->set_draw_center(true);
+	dark_panel->set_bg_color(get_theme_color(LW_NAME(dark_color_2), LW_NAME(Editor)));
+	ADD_STYLEBOX_OVERRIDE(tree, LW_NAME(panel), dark_panel);
+	ADD_STYLEBOX_OVERRIDE(description_pane, LW_NAME(panel), dark_panel);
 }
 
 void TaskPalette::_notification(int p_what) {
@@ -518,6 +820,20 @@ void TaskPalette::_notification(int p_what) {
 			filter_edit->connect(LW_NAME(text_changed), callable_mp(this, &TaskPalette::_apply_filter));
 			tool_refresh->connect(LW_NAME(pressed), callable_mp(this, &TaskPalette::refresh));
 			menu->connect(LW_NAME(id_pressed), callable_mp(this, &TaskPalette::_menu_action_selected));
+			tree->connect("item_mouse_selected", callable_mp(this, &TaskPalette::_on_item_mouse_selected));
+			tree->connect(LW_NAME(item_collapsed), callable_mp(this, &TaskPalette::_on_item_collapsed));
+			tree->connect("resized", callable_mp(this, &TaskPalette::_update_sticky_headers));
+			tree->connect("item_selected", callable_mp(this, &TaskPalette::_update_description));
+			connect("resized", callable_mp(this, &TaskPalette::_update_description_visibility));
+			for (int i = 0; i < tree->get_child_count(true); i++) {
+				VScrollBar *vsb = Object::cast_to<VScrollBar>(tree->get_child(i, true));
+				if (vsb != nullptr) {
+					vsb->connect("value_changed", callable_mp(this, &TaskPalette::_update_sticky_headers).unbind(1));
+				}
+			}
+			sticky_overlay->connect(LW_NAME(draw), callable_mp(this, &TaskPalette::_draw_sticky_headers));
+			sticky_overlay->connect(LW_NAME(gui_input), callable_mp(this, &TaskPalette::_on_sticky_gui_input));
+			sticky_overlay->connect("mouse_exited", callable_mp(this, &TaskPalette::_on_sticky_mouse_exited));
 			type_all->connect(LW_NAME(pressed), callable_mp(this, &TaskPalette::_type_filter_changed));
 			type_core->connect(LW_NAME(pressed), callable_mp(this, &TaskPalette::_type_filter_changed));
 			type_user->connect(LW_NAME(pressed), callable_mp(this, &TaskPalette::_type_filter_changed));
@@ -562,14 +878,14 @@ void TaskPalette::_notification(int p_what) {
 			String conf_path = LAYOUT_CONFIG_FILE();
 			cf->load(conf_path);
 
-			Array collapsed_sections;
-			for (int i = 0; i < sections->get_child_count(); i++) {
-				TaskPaletteSection *sec = Object::cast_to<TaskPaletteSection>(sections->get_child(i));
-				if (sec->is_collapsed()) {
-					collapsed_sections.push_back(sec->get_category_name());
+			// The change-type dialog keeps every folder open and must not overwrite the palette's.
+			if (!dialog_mode) {
+				Array collapsed;
+				for (const String &key : collapsed_folders) {
+					collapsed.push_back(key);
 				}
+				cf->set_value("LimboAI", "task_palette_collapsed_folders", collapsed);
 			}
-			cf->set_value("LimboAI", "task_palette_collapsed_sections", collapsed_sections);
 
 			cf->set_value("LimboAI", "task_palette_type_filter", filter_settings.type_filter);
 			cf->set_value("LimboAI", "task_palette_category_filter", filter_settings.category_filter);
@@ -604,6 +920,9 @@ void TaskPalette::_notification(int p_what) {
 
 void TaskPalette::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("refresh"), &TaskPalette::refresh);
+	ClassDB::bind_method(D_METHOD("_get_drag_data_fw"), &TaskPalette::_get_drag_data_fw);
+	ClassDB::bind_method(D_METHOD("_can_drop_data_fw"), &TaskPalette::_can_drop_data_fw);
+	ClassDB::bind_method(D_METHOD("_drop_data_fw"), &TaskPalette::_drop_data_fw);
 
 	ADD_SIGNAL(MethodInfo("task_selected"));
 	ADD_SIGNAL(MethodInfo("favorite_tasks_changed"));
@@ -635,15 +954,36 @@ TaskPalette::TaskPalette() {
 	tool_refresh->set_focus_mode(FocusMode::FOCUS_NONE);
 	hb->add_child(tool_refresh);
 
-	ScrollContainer *sc = memnew(ScrollContainer);
-	sc->set_h_size_flags(SIZE_EXPAND_FILL);
-	sc->set_v_size_flags(SIZE_EXPAND_FILL);
-	vb->add_child(sc);
+	tree = memnew(Tree);
+	tree->set_h_size_flags(SIZE_EXPAND_FILL);
+	tree->set_v_size_flags(SIZE_EXPAND_FILL);
+	tree->set_hide_root(true);
+	tree->set_select_mode(Tree::SELECT_SINGLE);
+	tree->set_allow_rmb_select(true);
+	tree->set_allow_reselect(true);
+	tree->set_drag_forwarding(callable_mp(this, &TaskPalette::_get_drag_data_fw), callable_mp(this, &TaskPalette::_can_drop_data_fw), callable_mp(this, &TaskPalette::_drop_data_fw));
 
-	sections = memnew(VBoxContainer);
-	sections->set_h_size_flags(SIZE_EXPAND_FILL);
-	sections->set_v_size_flags(SIZE_EXPAND_FILL);
-	sc->add_child(sections);
+	HBoxContainer *body = memnew(HBoxContainer);
+	body->set_v_size_flags(SIZE_EXPAND_FILL);
+	vb->add_child(body);
+	body->add_child(tree);
+
+	description_pane = memnew(PanelContainer);
+	description_pane->set_h_size_flags(SIZE_EXPAND_FILL);
+	description_pane->hide();
+	body->add_child(description_pane);
+
+	description_text = memnew(RichTextLabel);
+	description_text->set_use_bbcode(false);
+	description_text->set_selection_enabled(true);
+	description_text->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
+	description_text->set_focus_mode(FOCUS_NONE);
+	description_pane->add_child(description_text);
+
+	sticky_overlay = memnew(Control);
+	sticky_overlay->set_mouse_filter(MOUSE_FILTER_STOP);
+	sticky_overlay->hide();
+	tree->add_child(sticky_overlay);
 
 	menu = memnew(PopupMenu);
 	add_child(menu);

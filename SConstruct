@@ -18,6 +18,7 @@ from limboai_version import generate_module_version_header, get_godot_cpp_ref
 
 sys.path.append("gdextension")
 from fix_icon_imports import fix_icon_imports
+from gen_task_briefs import generate_task_briefs_header
 from update_icon_entries import update_icon_entries
 
 # Check if godot-cpp/ exists
@@ -87,6 +88,10 @@ env = SConscript("godot-cpp/SConstruct")
 # Generate version header.
 print("Generating LimboAI version header...")
 generate_module_version_header()
+
+# Generate task brief descriptions for the task palette tooltips.
+print("Generating LimboAI task briefs header...")
+generate_task_briefs_header()
 
 # Update icon entries in limboai.gdextension file.
 # Note: This will remove everything after [icons] section, and rebuild it with generated icon entries.

@@ -283,6 +283,8 @@ private:
 	void _probability_popup_closed();
 	void _on_tree_task_selected(const Ref<BTTask> &p_task);
 	void _on_tree_task_activated();
+	void _on_tree_bt_selected(const Ref<BehaviorTree> &p_behavior_tree);
+	void _on_palette_task_dropped(const String &p_task_meta, Ref<BTTask> p_to_task, int p_to_pos);
 	void _on_visibility_changed();
 	void _on_save_pressed();
 	void _on_history_back();

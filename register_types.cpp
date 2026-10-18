@@ -261,8 +261,6 @@ void initialize_limboai_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
 #ifdef LIMBOAI_GDEXTENSION
 		GDREGISTER_INTERNAL_CLASS(TaskTree);
-		GDREGISTER_INTERNAL_CLASS(TaskButton);
-		GDREGISTER_INTERNAL_CLASS(TaskPaletteSection);
 		GDREGISTER_INTERNAL_CLASS(TaskPalette);
 		GDREGISTER_INTERNAL_CLASS(ActionBanner);
 		GDREGISTER_INTERNAL_CLASS(ModeSwitchButton);
