@@ -197,6 +197,9 @@ private:
 	// it reads the insets off a node that has been laid out at least once; `p_retry` is how
 	// many times it may wait for that.
 	void _fit_nests(int p_retry = 0);
+	// A fit that the picture was not ready for is still owed. Kept rather than retried
+	// harder: what it is waiting for may be hours away -- see _fit_nests().
+	bool fit_pending = false;
 	// The middle of a nest, in the node's own coordinates, which is where it stops answering
 	// to the mouse. Worked out from the same fit: what is not the chrome is the room, and the
 	// room belongs to what stands in it.

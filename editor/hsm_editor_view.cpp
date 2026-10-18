@@ -51,14 +51,17 @@ const int COLUMN_WIDTH = 300;
 const int ROW_HEIGHT = 120;
 
 // The room a machine's node leaves around the states standing in it -- and, since the box is
-// laid over them, the smallest it may be made. A grid square and a half at GraphEdit's own
-// snapping distance of 20: enough that a state's shadow and a bowed edge stay inside the
-// box, and little enough that the box still reads as drawn around them rather than as a
-// region they happen to be in.
+// laid over them, the smallest it may be made. Half a grid square at GraphEdit's own
+// snapping distance of 20: enough that the border still reads as drawn around the states
+// rather than as clipped to them, and little enough that the states inside read as the
+// machine's contents rather than as a group standing somewhere in a larger empty box.
+//
+// A state's shadow and a bowed edge are not kept inside the box at this width -- they run
+// over the border. The room is not what holds them; it is only what the border is offset by.
 //
 // Where that node's border runs and how tall its title bar is are not here -- they are read
 // back off the node itself, so the theme decides them and this does not have to guess.
-const int NEST_PADDING = 30;
+const int NEST_PADDING = 10;
 
 // The strip inside a nest's other three edges that still answers to the mouse. Everything
 // further in is the room, and the room belongs to what stands in it: a press there has to
@@ -518,6 +521,19 @@ Rect2 HSMEditorView::_drawn_rect(GraphNode *p_node) const {
 // deferred and why it waits for one when it arrives too early.
 void HSMEditorView::_fit_nests(int p_retry) {
 	if (nests.is_empty()) {
+		fit_pending = false;
+		return;
+	}
+	// A view nobody is looking at has no sizes to read: a Control that is not visible in the
+	// tree never has its minimum size applied, so every node here measures zero and the waiting
+	// above would spend its four tries against a picture that was never going to be laid out.
+	// In the debugger that is the ordinary case rather than a corner of one -- a character is
+	// picked the moment the game registers its first machine, and the panel is opened some time
+	// after that -- and what it left behind was a machine drawn as a box the size of its own
+	// title, standing at the origin with the states it is a box around scattered elsewhere.
+	// So the fit is not given up here; it is set aside until there is something to measure.
+	if (!is_visible_in_tree()) {
+		fit_pending = true;
 		return;
 	}
 	for (int i = 0; i < nests.size(); i++) {
@@ -528,6 +544,9 @@ void HSMEditorView::_fit_nests(int p_retry) {
 		Vector2 top_left = nest.content->get_position();
 		Size2 node_size = nest.node->get_size();
 		if (node_size.y < 1.0 || top_left.y < 1.0) {
+			// Still owed either way: the tries run out within a few frames, and being shown
+			// again is the one thing that can change the answer after they have.
+			fit_pending = true;
 			if (p_retry < 4) {
 				callable_mp(this, &HSMEditorView::_fit_nests).bind(p_retry + 1).call_deferred();
 			}
@@ -570,6 +589,7 @@ void HSMEditorView::_fit_nests(int p_retry) {
 		nest.last_offset = offset;
 		_update_nest_hole(nest);
 	}
+	fit_pending = false;
 	// The rings a running machine is drawn with are laid down where the nodes stood, and the
 	// nodes have just been moved. Nothing else moves them once a graph is up -- a read-only
 	// view is the only one that has rings, and nothing on it can be dragged.
@@ -878,6 +898,7 @@ void HSMEditorView::refresh() {
 
 	// After the nodes exist and not before: a nest is measured against them, and a node
 	// that has never been laid out has no size to measure.
+	fit_pending = true;
 	callable_mp(this, &HSMEditorView::_fit_nests).bind(0).call_deferred();
 }
 
@@ -2105,6 +2126,15 @@ void HSMEditorView::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_PROCESS: {
 			_fade_pulses(get_process_delta_time());
+		} break;
+		case NOTIFICATION_VISIBILITY_CHANGED: {
+			// The fit that was set aside while nobody was looking. Deferred rather than done
+			// here: being shown is what starts the layout, not what finishes it -- the nodes
+			// have their minimum sizes applied a frame later, and this notification reaches
+			// the view before it reaches them.
+			if (fit_pending && is_visible_in_tree()) {
+				callable_mp(this, &HSMEditorView::_fit_nests).bind(0).call_deferred();
+			}
 		} break;
 		case NOTIFICATION_READY: {
 			state_list->connect("item_selected", callable_mp(this, &HSMEditorView::_on_list_item_selected));
