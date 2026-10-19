@@ -145,6 +145,7 @@ void TaskPalette::_menu_action_selected(int p_id) {
 			}
 			ProjectSettings::get_singleton()->set_setting("limbo_ai/behavior_tree/favorite_tasks", favorite_tasks);
 			ProjectSettings::get_singleton()->save();
+			refresh();
 			emit_signal(LW_NAME(favorite_tasks_changed));
 		} break;
 	}
@@ -570,6 +571,13 @@ void TaskPalette::_apply_filter(const String &p_text) {
 	for (TreeItem *group = root->get_first_child(); group != nullptr; group = group->get_next()) {
 		int group_matches = 0;
 		for (TreeItem *folder = group->get_first_child(); folder != nullptr; folder = folder->get_next()) {
+			if (!_is_folder(folder)) {
+				// A favorite: tasks stand right under the Favorites root.
+				bool match = !filtering || folder->get_text(0).findn(p_text) != -1;
+				folder->set_visible(match);
+				group_matches += match;
+				continue;
+			}
 			int matches = 0;
 			for (TreeItem *task = folder->get_first_child(); task != nullptr; task = task->get_next()) {
 				bool match = !filtering || task->get_text(0).findn(p_text) != -1;
@@ -726,6 +734,28 @@ void TaskPalette::refresh() {
 	tree->clear();
 	TreeItem *root = tree->create_item();
 
+	// Favorites first, above "LimboAI": the tasks themselves, in the order they were added,
+	// whatever the type and category filters say (they were picked by hand). A favorite whose
+	// class or script is gone is left out; the editor's banner offers to remove it.
+	if (!dialog_mode) {
+		PackedStringArray favorite_tasks = GLOBAL_GET("limbo_ai/behavior_tree/favorite_tasks");
+		TreeItem *favorites = nullptr;
+		for (const String &task_meta : favorite_tasks) {
+			if (task_meta.is_empty() || (!FILE_EXISTS(task_meta) && !ClassDB::class_exists(task_meta))) {
+				continue;
+			}
+			if (favorites == nullptr) {
+				favorites = _create_folder(root, TTR("Favorites"), "favorites", get_theme_icon(LW_NAME(Favorites), LW_NAME(EditorIcons)));
+			}
+			TreeItem *item = tree->create_item(favorites);
+			item->set_text(0, get_task_display_name(task_meta));
+			item->set_icon(0, LimboUtility::get_singleton()->get_task_icon(task_meta));
+			item->set_icon_max_width(0, 16 * EDSCALE);
+			item->set_metadata(0, task_meta);
+			item->set_tooltip_text(0, task_meta.begins_with("res://") ? _get_task_description(task_meta, false) + "\n\n" + task_meta : _get_task_description(task_meta, false));
+		}
+	}
+
 	// Two passes over the same categories: built-in tasks under "LimboAI", then the scripts of
 	// user_task_dirs under "Project". A root or folder is created only once a task lands in it.
 	for (int pass = 0; pass < 2; pass++) {
@@ -753,11 +783,8 @@ void TaskPalette::refresh() {
 					folder = _create_folder(group, cat, (user_pass ? "user/" : "core/") + cat, Ref<Texture2D>());
 				}
 
-				String tname = user_pass
-						? task_meta.get_file().get_basename().trim_prefix("BT").to_pascal_case()
-						: task_meta.trim_prefix("BT");
 				TreeItem *item = tree->create_item(folder);
-				item->set_text(0, tname);
+				item->set_text(0, get_task_display_name(task_meta));
 				item->set_icon(0, LimboUtility::get_singleton()->get_task_icon(task_meta));
 				item->set_icon_max_width(0, 16 * EDSCALE); // Force user icons to be of the proper size.
 				item->set_metadata(0, task_meta);
@@ -775,7 +802,69 @@ void TaskPalette::refresh() {
 	_update_description();
 }
 
+String TaskPalette::get_task_display_name(const String &p_task_meta) {
+	if (p_task_meta.begins_with("res:")) {
+		return p_task_meta.get_file().get_basename().trim_prefix("BT").to_pascal_case();
+	}
+	return p_task_meta.trim_prefix("BT");
+}
+
+namespace {
+
+// The task's row outside Favorites, so "show in palette" lands where the task belongs.
+TreeItem *_find_task_item(TreeItem *p_root, const String &p_task_meta) {
+	if (p_root == nullptr) {
+		return nullptr;
+	}
+	for (TreeItem *group = p_root->get_first_child(); group != nullptr; group = group->get_next()) {
+		if (String(group->get_metadata(0)) == String(FOLDER_PREFIX) + "favorites") {
+			continue;
+		}
+		for (TreeItem *folder = group->get_first_child(); folder != nullptr; folder = folder->get_next()) {
+			for (TreeItem *task = folder->get_first_child(); task != nullptr; task = task->get_next()) {
+				if (String(task->get_metadata(0)) == p_task_meta) {
+					return task;
+				}
+			}
+		}
+	}
+	return nullptr;
+}
+
+} // namespace
+
+void TaskPalette::reveal_task(const String &p_task_meta) {
+	TreeItem *item = _find_task_item(tree->get_root(), p_task_meta);
+	if (item == nullptr && (filter_settings.type_filter != FilterSettings::TYPE_ALL || filter_settings.category_filter != FilterSettings::CATEGORY_ALL)) {
+		// Left out by the type or category filter: show everything again.
+		filter_settings.type_filter = FilterSettings::TYPE_ALL;
+		filter_settings.category_filter = FilterSettings::CATEGORY_ALL;
+		_update_filter_button();
+		refresh();
+		item = _find_task_item(tree->get_root(), p_task_meta);
+	}
+	if (item == nullptr) {
+		return;
+	}
+	if (!item->is_visible() && !filter_edit->get_text().is_empty()) {
+		// Hidden by the typed filter.
+		filter_edit->set_text("");
+		_apply_filter("");
+	}
+	// Opened as the user would open them, so the change is remembered like theirs.
+	for (TreeItem *parent = item->get_parent(); parent != nullptr && parent != tree->get_root(); parent = parent->get_parent()) {
+		if (parent->is_collapsed()) {
+			parent->set_collapsed(false);
+		}
+	}
+	item->select(0);
+	tree->scroll_to_item(item, true);
+	_update_description();
+	callable_mp(this, &TaskPalette::_update_sticky_headers).call_deferred();
+}
+
 void TaskPalette::use_dialog_mode() {
+	header_bar->hide();
 	tool_filters->hide();
 	tool_refresh->hide();
 	dialog_mode = true;
@@ -932,8 +1021,12 @@ TaskPalette::TaskPalette() {
 	VBoxContainer *vb = memnew(VBoxContainer);
 	add_child(vb);
 
+	header_bar = memnew(HBoxContainer);
+	vb->add_child(header_bar);
+
 	HBoxContainer *hb = memnew(HBoxContainer);
 	vb->add_child(hb);
+	tool_bar = hb;
 
 	tool_filters = memnew(Button);
 	tool_filters->set_tooltip_text(TTR("Show filters"));

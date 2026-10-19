@@ -93,6 +93,50 @@ inline void _switch_to_owner_scene_if_builtin(const Ref<BehaviorTree> &p_behavio
 	}
 }
 
+// Undo action names for adding and removing tasks. The editor prints an action's name to the
+// Output log on undo and redo (and lists it in the History dock), so the name says which
+// task, its type, which parent and position, and which behavior tree file was edited.
+String _task_label(const Ref<BTTask> &p_task) {
+	if (p_task.is_null()) {
+		return "<none>";
+	}
+	String type = p_task->get_class();
+	Ref<Script> script = p_task->get_script();
+	if (script.is_valid() && !script->get_path().is_empty()) {
+		type = script->get_path().get_file().get_basename();
+	}
+	return vformat("\"%s\" [%s]", p_task->get_task_name(), type);
+}
+
+String _bt_label(const Ref<BehaviorTree> &p_bt) {
+	if (p_bt.is_null()) {
+		return "<no behavior tree>";
+	}
+	return p_bt->get_path().is_empty() ? String("<unsaved behavior tree>") : p_bt->get_path();
+}
+
+// "<what> under parent <parent> at index <i>"; a null parent means the tree's root slot.
+String _placement_label(const Ref<BTTask> &p_parent, int p_index) {
+	if (p_parent.is_null()) {
+		return "as the root task";
+	}
+	int index = p_index < 0 ? p_parent->get_child_count() : p_index;
+	return vformat("under parent %s at index %d", _task_label(p_parent), index);
+}
+
+// One line per task for several, so a multi-task edit still names every task and parent.
+String _tasks_label(const Vector<Ref<BTTask>> &p_tasks) {
+	PackedStringArray parts;
+	for (const Ref<BTTask> &task : p_tasks) {
+		if (task.is_null()) {
+			continue;
+		}
+		Ref<BTTask> parent = task->get_parent();
+		parts.push_back(vformat("%s (%s)", _task_label(task), parent.is_null() ? String("root task") : "parent " + _task_label(parent)));
+	}
+	return String(", ").join(parts);
+}
+
 } // unnamed namespace
 
 //**** LimboAIEditor
@@ -128,8 +172,6 @@ void LimboAIEditor::_add_task(const Ref<BTTask> &p_task, bool p_as_sibling) {
 	}
 	ERR_FAIL_COND(p_task.is_null());
 
-	EditorUndoRedoManager *undo_redo = _new_undo_redo_action(TTR("Add BT Task"));
-
 	int insert_idx = -1;
 	Ref<BTTask> selected = task_tree->get_selected();
 	Ref<BTTask> parent = selected;
@@ -138,16 +180,19 @@ void LimboAIEditor::_add_task(const Ref<BTTask> &p_task, bool p_as_sibling) {
 		parent = task_tree->get_bt()->get_root_task();
 		selected = parent;
 	}
+	if (parent.is_valid() && p_as_sibling && selected.is_valid() && selected->get_parent().is_valid()) {
+		// Insert task after the currently selected and on the same level (usually when shift is pressed).
+		parent = selected->get_parent();
+		insert_idx = selected->get_index() + 1;
+	}
+
+	EditorUndoRedoManager *undo_redo = _new_undo_redo_action(vformat(TTR("Add BT Task %s %s in %s"),
+			_task_label(p_task), _placement_label(parent, insert_idx), _bt_label(task_tree->get_bt())));
 	if (parent.is_null()) {
 		// When tree is empty.
 		undo_redo->add_do_method(task_tree->get_bt().ptr(), LW_NAME(set_root_task), p_task);
 		undo_redo->add_undo_method(task_tree->get_bt().ptr(), LW_NAME(set_root_task), task_tree->get_bt()->get_root_task());
 	} else {
-		if (p_as_sibling && selected.is_valid() && selected->get_parent().is_valid()) {
-			// Insert task after the currently selected and on the same level (usually when shift is pressed).
-			parent = selected->get_parent();
-			insert_idx = selected->get_index() + 1;
-		}
 		undo_redo->add_do_method(parent.ptr(), LW_NAME(add_child_at_index), p_task, insert_idx);
 		undo_redo->add_undo_method(parent.ptr(), LW_NAME(remove_child), p_task);
 	}
@@ -209,7 +254,8 @@ void LimboAIEditor::_on_palette_task_dropped(const String &p_task_meta, Ref<BTTa
 	Ref<BTTask> task = _create_task_by_class_or_path(p_task_meta);
 	ERR_FAIL_COND(task.is_null());
 
-	EditorUndoRedoManager *undo_redo = _new_undo_redo_action(TTR("Add BT Task"));
+	EditorUndoRedoManager *undo_redo = _new_undo_redo_action(vformat(TTR("Add BT Task %s %s in %s"),
+			_task_label(task), _placement_label(p_to_task, p_to_pos), _bt_label(bt)));
 	if (p_to_task.is_null()) {
 		// Dropped on the file item of an empty tree.
 		ERR_FAIL_COND(bt->get_root_task().is_valid());
@@ -225,7 +271,10 @@ void LimboAIEditor::_on_palette_task_dropped(const String &p_task_meta, Ref<BTTa
 void LimboAIEditor::_remove_task(const Ref<BTTask> &p_task) {
 	ERR_FAIL_COND(p_task.is_null());
 	ERR_FAIL_COND(task_tree->get_bt().is_null());
-	EditorUndoRedoManager *undo_redo = _new_undo_redo_action(TTR("Remove BT Task"));
+	Vector<Ref<BTTask>> removed;
+	removed.push_back(p_task);
+	EditorUndoRedoManager *undo_redo = _new_undo_redo_action(vformat(TTR("Remove BT Task %s from %s"),
+			_tasks_label(removed), _bt_label(task_tree->get_bt())));
 	if (p_task->get_parent().is_null()) {
 		ERR_FAIL_COND(task_tree->get_bt()->get_root_task() != p_task);
 		undo_redo->add_do_method(task_tree->get_bt().ptr(), LW_NAME(set_root_task), Variant());
@@ -385,21 +434,23 @@ void LimboAIEditor::_show_editor_for(const Ref<Resource> &p_res) {
 void LimboAIEditor::_update_toolbar(ToolbarMode p_mode) {
 	toolbar_mode = p_mode;
 
-	fav_tasks_hbox->set_visible(p_mode == TOOLBAR_BT);
-	hsm_tools_hbox->set_visible(p_mode == TOOLBAR_HSM);
-	new_script_btn->set_visible(p_mode == TOOLBAR_BT);
 	// Save is about the open document; with none there is nothing for it to mean. New and
 	// Load stay in all three states -- they are how a document comes to be open at all, and
 	// the empty screen's own hint points at them.
 	save_btn->set_visible(p_mode != TOOLBAR_NONE);
-	blackboard_btn->set_visible(p_mode == TOOLBAR_BT);
 
-	docs_sep->set_visible(p_mode != TOOLBAR_NONE);
-	script_sep->set_visible(p_mode == TOOLBAR_BT);
+	// Misc stands at the far right of whatever row is rightmost: the palette's header with a
+	// tree open (the palette is the right-hand pane then), the toolbar otherwise.
+	HBoxContainer *misc_parent = p_mode == TOOLBAR_BT ? task_palette->get_header_bar() : misc_slot;
+	if (misc_btn->get_parent() != misc_parent) {
+		if (misc_btn->get_parent() != nullptr) {
+			misc_btn->get_parent()->remove_child(misc_btn);
+		}
+		misc_parent->add_child(misc_btn);
+	}
 
 	switch (p_mode) {
 		case TOOLBAR_HSM: {
-			new_btn->set_text(TTR("New State Machine"));
 			new_btn->set_tooltip_text(TTR("Create a new state machine."));
 			// Swapped rather than left alone: a Button puts its shortcut's *name* in its
 			// tooltip, so keeping the tree's would read "New Behavior Tree" on a button that
@@ -409,7 +460,6 @@ void LimboAIEditor::_update_toolbar(ToolbarMode p_mode) {
 			save_dialog->set_title(TTR("Save State Machine"));
 		} break;
 		case TOOLBAR_BT: {
-			new_btn->set_text(TTR("New Behavior Tree"));
 			new_btn->set_tooltip_text(TTR("Create a new behavior tree."));
 			new_btn->set_shortcut(LW_GET_SHORTCUT("limbo_ai/new_behavior_tree"));
 			save_dialog->set_title(TTR("Save Behavior Tree"));
@@ -417,7 +467,6 @@ void LimboAIEditor::_update_toolbar(ToolbarMode p_mode) {
 		default: {
 			// Nothing open, so nothing to name it after. Whichever kind the button then makes
 			// is a guess, and the tree is the one the hint in the middle of the screen asks for.
-			new_btn->set_text(TTR("New"));
 			new_btn->set_tooltip_text(TTR("Create a new behavior tree."));
 			new_btn->set_shortcut(LW_GET_SHORTCUT("limbo_ai/new_behavior_tree"));
 			save_dialog->set_title(TTR("Save Behavior Tree"));
@@ -607,6 +656,8 @@ void LimboAIEditor::_remove_task_from_favorite(const String &p_task) {
 	}
 	ProjectSettings::get_singleton()->set_setting("limbo_ai/behavior_tree/favorite_tasks", favorite_tasks);
 	ProjectSettings::get_singleton()->save();
+	task_palette->refresh();
+	_update_banners();
 }
 
 void LimboAIEditor::_save_and_restart() {
@@ -724,6 +775,21 @@ void LimboAIEditor::_on_tree_rmb(const Vector2 &p_menu_pos) {
 
 	Vector<Ref<BTTask>> selection = task_tree->get_selected_tasks();
 	if (selection.is_empty()) {
+		if (task_tree->is_file_item_selected() && task_tree->get_bt().is_valid()) {
+			// The file row stands for the tree resource: what a document tab's menu offers,
+			// plus folding the whole tree at once.
+			bool saved = !task_tree->get_bt()->get_path().is_empty();
+			menu->add_icon_item(get_theme_icon("ShowInFileSystem", LW_NAME(EditorIcons)), TTR("Show in FileSystem"), ACTION_SHOW_IN_FILESYSTEM);
+			menu->add_shortcut(LW_GET_SHORTCUT("limbo_ai/jump_to_owner"), ACTION_JUMP_TO_OWNER);
+			menu->set_item_disabled(menu->get_item_index(ACTION_SHOW_IN_FILESYSTEM), !saved);
+			menu->set_item_disabled(menu->get_item_index(ACTION_JUMP_TO_OWNER), !saved);
+			menu->add_separator();
+			menu->add_icon_item(get_theme_icon("CollapseTree", LW_NAME(EditorIcons)), TTR("Collapse All"), ACTION_COLLAPSE_ALL);
+			menu->add_icon_item(get_theme_icon("ExpandTree", LW_NAME(EditorIcons)), TTR("Expand All"), ACTION_EXPAND_ALL);
+			menu->reset_size();
+			menu->set_position(p_menu_pos);
+			menu->popup();
+		}
 		return;
 	}
 
@@ -734,6 +800,8 @@ void LimboAIEditor::_on_tree_rmb(const Vector2 &p_menu_pos) {
 	menu->add_icon_item(theme_cache.change_type_icon, TTR("Change Type"), ACTION_CHANGE_TYPE);
 	menu->add_icon_item(theme_cache.edit_script_icon, TTR("Edit Script"), ACTION_EDIT_SCRIPT);
 	menu->add_icon_item(theme_cache.doc_icon, TTR("Open Documentation"), ACTION_OPEN_DOC);
+	menu->add_icon_item(get_theme_icon(LW_NAME(Search), LW_NAME(EditorIcons)), TTR("Show in Palette"), ACTION_SHOW_IN_PALETTE);
+	menu->set_item_disabled(menu->get_item_index(ACTION_SHOW_IN_PALETTE), selection.size() != 1);
 	menu->set_item_disabled(menu->get_item_index(ACTION_RENAME), selection.size() != 1);
 	menu->set_item_disabled(menu->get_item_index(ACTION_CHANGE_TYPE), selection.size() != 1);
 	menu->set_item_disabled(menu->get_item_index(ACTION_EDIT_SCRIPT), selection.size() != 1 || selection[0]->get_script() == Variant());
@@ -879,9 +947,14 @@ void LimboAIEditor::_action_selected(int p_id) {
 		case ACTION_PASTE_AFTER: {
 			Ref<BTTask> sel = task_tree->get_selected();
 			ERR_FAIL_COND(sel.is_null());
-			EditorUndoRedoManager *undo_redo = _new_undo_redo_action(TTR("Paste BT Tasks"));
 			Ref<BTTask> parent = p_id == ACTION_PASTE_AFTER ? sel->get_parent() : sel;
 			int idx = p_id == ACTION_PASTE_AFTER ? sel->get_index() + 1 : sel->get_child_count();
+			PackedStringArray pasted;
+			for (const Ref<BTTask> &clip : clipboard) {
+				pasted.push_back(_task_label(clip));
+			}
+			EditorUndoRedoManager *undo_redo = _new_undo_redo_action(vformat(TTR("Paste %d BT Task(s) %s %s in %s"),
+					clipboard.size(), String(", ").join(pasted), _placement_label(parent, idx), _bt_label(task_tree->get_bt())));
 			Vector<Ref<BTTask>> newly_added;
 			for (const Ref<BTTask> &clip : clipboard) {
 				Ref<BTTask> dup = clip->clone();
@@ -953,7 +1026,8 @@ void LimboAIEditor::_action_selected(int p_id) {
 			if (selection.is_empty()) {
 				return;
 			}
-			EditorUndoRedoManager *undo_redo = _new_undo_redo_action(TTR("Duplicate BT Tasks"));
+			EditorUndoRedoManager *undo_redo = _new_undo_redo_action(vformat(TTR("Duplicate %d BT Task(s) %s in %s"),
+					selection.size(), _tasks_label(selection), _bt_label(task_tree->get_bt())));
 			Vector<Ref<BTTask>> duplicated;
 			for (int i = selection.size() - 1; i >= 0; i--) {
 				Ref<BTTask> parent = selection[i]->get_parent();
@@ -994,6 +1068,32 @@ void LimboAIEditor::_action_selected(int p_id) {
 			}
 		} break;
 		case ACTION_CUT:
+		case ACTION_SHOW_IN_PALETTE: {
+			Ref<BTTask> sel = task_tree->get_selected();
+			if (sel.is_valid()) {
+				palette_holder->show();
+				task_palette->reveal_task(TaskTree::get_task_meta(sel));
+			}
+		} break;
+		case ACTION_SHOW_IN_FILESYSTEM: {
+			Ref<BehaviorTree> bt = task_tree->get_bt();
+			if (bt.is_valid() && !bt->get_path().is_empty()) {
+				// A built-in tree is found by its scene.
+				EditorInterface::get_singleton()->get_file_system_dock()->navigate_to_path(bt->get_path().get_slice("::", 0));
+			}
+		} break;
+		case ACTION_JUMP_TO_OWNER: {
+			Ref<BehaviorTree> bt = task_tree->get_bt();
+			if (bt.is_valid() && !bt->get_path().is_empty()) {
+				owner_picker->pick_and_open_owner_of_resource(bt->get_path());
+			}
+		} break;
+		case ACTION_COLLAPSE_ALL: {
+			task_tree->set_all_collapsed(true);
+		} break;
+		case ACTION_EXPAND_ALL: {
+			task_tree->set_all_collapsed(false);
+		} break;
 		case ACTION_REMOVE: {
 			Vector<Ref<BTTask>> selection = task_tree->get_selected_tasks();
 			if (selection.is_empty()) {
@@ -1002,7 +1102,9 @@ void LimboAIEditor::_action_selected(int p_id) {
 			if (p_id == ACTION_CUT) {
 				clipboard.clear();
 			}
-			EditorUndoRedoManager *undo_redo = _new_undo_redo_action(TTR("Remove BT Tasks"), UndoRedo::MERGE_ALL);
+			String verb = p_id == ACTION_CUT ? TTR("Cut") : TTR("Remove");
+			EditorUndoRedoManager *undo_redo = _new_undo_redo_action(vformat(TTR("%s %d BT Task(s) %s from %s"),
+					verb, selection.size(), _tasks_label(selection), _bt_label(task_tree->get_bt())), UndoRedo::MERGE_ALL);
 			for (const Ref<BTTask> &task : selection) {
 				if (task->is_root()) {
 					undo_redo->add_do_method(task_tree->get_bt().ptr(), LW_NAME(set_root_task), Variant());
@@ -1066,6 +1168,9 @@ void LimboAIEditor::_probability_popup_closed() {
 
 void LimboAIEditor::_misc_option_selected(int p_id) {
 	switch (p_id) {
+		case MISC_COPY_VERSION: {
+			_copy_version_info();
+		} break;
 		case MISC_ONLINE_DOCUMENTATION: {
 			LimboUtility::get_singleton()->open_doc_online();
 		} break;
@@ -1203,7 +1308,6 @@ void LimboAIEditor::_on_visibility_changed() {
 		task_palette->refresh();
 		_update_banners();
 	}
-	_update_favorite_tasks();
 
 	if (request_update_tabs && history.size() > 0) {
 		_update_tabs();
@@ -1358,7 +1462,7 @@ void LimboAIEditor::_task_type_selected(const String &p_class_or_path) {
 }
 
 void LimboAIEditor::_copy_version_info() {
-	DisplayServer::get_singleton()->clipboard_set(version_btn->get_text());
+	DisplayServer::get_singleton()->clipboard_set(TTR("v") + String(GET_LIMBOAI_FULL_VERSION()));
 }
 
 void LimboAIEditor::_replace_task(const Ref<BTTask> &p_task, const Ref<BTTask> &p_by_task) {
@@ -1555,9 +1659,12 @@ void LimboAIEditor::_update_tab_close_buttons() {
 	// Setting an icon makes TabBar work out its hovered tab again from where the mouse is,
 	// without asking whether the mouse is on the bar at all. Over the scroll bar, which lies
 	// on the bar's lower edge, the answer is a tab: the highlight came back after the bar had
-	// already been told the mouse left, and nothing told it again. So it is told again.
+	// already been told the mouse left, and nothing told it again. So it is told again --
+	// through the `mouse_exited` signal, not NOTIFICATION_MOUSE_EXIT: TabBar clears its hover
+	// only in its own handler of that signal (the notification merely stops its hover-switch
+	// timer), so the notification left the highlight standing after crossing the scroll bar.
 	if (!tab_bar_mouse_inside && tab_bar->is_inside_tree()) {
-		tab_bar->notification(NOTIFICATION_MOUSE_EXIT);
+		tab_bar->emit_signal(LW_NAME(mouse_exited));
 	}
 }
 
@@ -1583,7 +1690,7 @@ void LimboAIEditor::_tab_bar_mouse_entered() {
 
 void LimboAIEditor::_tab_bar_mouse_exited() {
 	if (!tab_bar_mouse_inside) {
-		// The exit sent from _update_tab_close_buttons() comes back here as a signal.
+		// The exit re-sent from _update_tab_close_buttons() arrives here too.
 		return;
 	}
 	tab_bar_mouse_inside = false;
@@ -1887,41 +1994,7 @@ void LimboAIEditor::save_all(bool p_external_only) {
 	}
 }
 
-void LimboAIEditor::_update_favorite_tasks() {
-	for (int i = 0; i < fav_tasks_hbox->get_child_count(); i++) {
-		fav_tasks_hbox->get_child(i)->queue_free();
-	}
-	Array favorite_tasks = GLOBAL_GET("limbo_ai/behavior_tree/favorite_tasks");
-	for (int i = 0; i < favorite_tasks.size(); i++) {
-		String task_meta = favorite_tasks[i];
-
-		if (task_meta.is_empty() || (!FILE_EXISTS(task_meta) && !ClassDB::class_exists(task_meta))) {
-			callable_mp(this, &LimboAIEditor::_update_banners).call_deferred();
-			continue;
-		}
-
-		Button *btn = memnew(Button);
-		String task_name;
-		if (task_meta.begins_with("res:")) {
-			task_name = task_meta.get_file().get_basename().trim_prefix("BT").to_pascal_case();
-		} else {
-			task_name = task_meta.trim_prefix("BT");
-		}
-		btn->set_text(task_name);
-		btn->set_meta(LW_NAME(task_meta), task_meta);
-		btn->set_button_icon(LimboUtility::get_singleton()->get_task_icon(task_meta));
-		btn->set_tooltip_text(vformat(TTR("Add %s task."), task_name));
-		btn->set_flat(true);
-		btn->add_theme_constant_override(LW_NAME(icon_max_width), 16 * EDSCALE); // Force user icons to be of the proper size.
-		btn->set_focus_mode(Control::FOCUS_NONE);
-		btn->connect(LW_NAME(pressed), callable_mp(this, &LimboAIEditor::_add_task_by_class_or_path).bind(task_meta));
-		fav_tasks_hbox->add_child(btn);
-	}
-}
-
 void LimboAIEditor::_update_misc_menu() {
-	PopupMenu *misc_menu = misc_btn->get_popup();
-
 	misc_menu->clear();
 
 	misc_menu->add_icon_item(theme_cache.doc_icon, TTR("Online Documentation"), MISC_ONLINE_DOCUMENTATION);
@@ -1956,6 +2029,20 @@ void LimboAIEditor::_update_misc_menu() {
 
 	misc_menu->add_separator();
 	misc_menu->add_icon_shortcut(theme_cache.search_icon, LW_GET_SHORTCUT("limbo_ai/find_task"), MISC_SEARCH_TREE);
+
+	// The version used to stand at the right end of the toolbar.
+	misc_menu->add_separator();
+	misc_menu->add_item(vformat(TTR("Copy Version (v%s)"), String(GET_LIMBOAI_FULL_VERSION())), MISC_COPY_VERSION);
+}
+
+// The button stands at the far right of the screen, so the menu opens right-aligned under it
+// rather than running off the edge.
+void LimboAIEditor::_popup_misc_menu() {
+	_update_misc_menu();
+	misc_menu->reset_size();
+	Rect2 rect(misc_btn->get_screen_position(), misc_btn->get_size());
+	misc_menu->set_position(Vector2i(int(rect.position.x + rect.size.x) - misc_menu->get_size().x, int(rect.position.y + rect.size.y)));
+	misc_menu->popup();
 }
 
 void LimboAIEditor::_update_banners() {
@@ -2046,9 +2133,6 @@ void LimboAIEditor::_notification(int p_what) {
 			load_dialog->connect("file_selected", callable_mp(this, &LimboAIEditor::_load_resource));
 			extract_dialog->connect("file_selected", callable_mp(this, &LimboAIEditor::_extract_subtree));
 			new_btn->connect(LW_NAME(pressed), callable_mp(this, &LimboAIEditor::_on_new_pressed));
-			hsm_add_state_btn->connect(LW_NAME(pressed), callable_mp(hsm_view, &HSMEditorView::add_state));
-			hsm_add_machine_btn->connect(LW_NAME(pressed), callable_mp(hsm_view, &HSMEditorView::add_machine));
-			hsm_remove_btn->connect(LW_NAME(pressed), callable_mp(hsm_view, &HSMEditorView::remove_selected));
 			load_btn->connect(LW_NAME(pressed), callable_mp(this, &LimboAIEditor::_popup_file_dialog).bind(load_dialog));
 			task_tree->connect("rmb_pressed", callable_mp(this, &LimboAIEditor::_on_tree_rmb));
 			task_tree->connect("task_selected", callable_mp(this, &LimboAIEditor::_on_tree_task_selected));
@@ -2059,10 +2143,10 @@ void LimboAIEditor::_notification(int p_what) {
 			task_tree->connect("probability_clicked", callable_mp(this, &LimboAIEditor::_action_selected).bind(ACTION_EDIT_PROBABILITY));
 			task_tree->connect("visibility_changed", callable_mp(this, &LimboAIEditor::_on_visibility_changed));
 			save_btn->connect(LW_NAME(pressed), callable_mp(this, &LimboAIEditor::_on_save_pressed));
-			misc_btn->connect(LW_NAME(pressed), callable_mp(this, &LimboAIEditor::_update_misc_menu));
-			misc_btn->get_popup()->connect("id_pressed", callable_mp(this, &LimboAIEditor::_misc_option_selected));
+			misc_btn->connect(LW_NAME(pressed), callable_mp(this, &LimboAIEditor::_popup_misc_menu));
+			misc_menu->connect("id_pressed", callable_mp(this, &LimboAIEditor::_misc_option_selected));
 			task_palette->connect("task_selected", callable_mp(this, &LimboAIEditor::_add_task_by_class_or_path));
-			task_palette->connect("favorite_tasks_changed", callable_mp(this, &LimboAIEditor::_update_favorite_tasks));
+			task_palette->connect("favorite_tasks_changed", callable_mp(this, &LimboAIEditor::_update_banners));
 			change_type_palette->connect("task_selected", callable_mp(this, &LimboAIEditor::_task_type_selected));
 			menu->connect("id_pressed", callable_mp(this, &LimboAIEditor::_action_selected));
 			weight_mode->connect(LW_NAME(pressed), callable_mp(this, &LimboAIEditor::_update_probability_edit));
@@ -2092,7 +2176,6 @@ void LimboAIEditor::_notification(int p_what) {
 			tab_hscroll->connect(LW_NAME(mouse_exited), callable_mp(this, &LimboAIEditor::_update_tab_strip_hover));
 			blackboard_btn->connect(LW_NAME(pressed), callable_mp(this, &LimboAIEditor::_on_blackboard_pressed));
 			browser->connect("resource_activated", callable_mp(this, &LimboAIEditor::_load_resource));
-			version_btn->connect(LW_NAME(pressed), callable_mp(this, &LimboAIEditor::_copy_version_info));
 
 			EDITOR_FILE_SYSTEM()->connect("resources_reload", callable_mp(this, &LimboAIEditor::_on_resources_reload));
 			EDITOR_FILE_SYSTEM()->connect("filesystem_changed", callable_mp(this, &LimboAIEditor::_on_filesystem_changed));
@@ -2117,14 +2200,7 @@ void LimboAIEditor::_notification(int p_what) {
 				tab_scroll_hint->set_self_modulate(get_theme_color("scroll_hint_horizontal_color", "ScrollContainer"));
 			}
 
-			// The plugin's own icons for the two resource types, rather than a generic plus:
-			// what these buttons add *is* a state and a machine, and the same two pictures
-			// name them in the FileSystem dock and on the inspector.
-			hsm_add_state_btn->set_button_icon(LimboUtility::get_singleton()->get_task_icon("HSMStateSpec"));
-			hsm_add_machine_btn->set_button_icon(LimboUtility::get_singleton()->get_task_icon("HierarchicalStateMachine"));
-			hsm_remove_btn->set_button_icon(get_theme_icon(LW_NAME(Remove), LW_NAME(EditorIcons)));
 
-			_update_favorite_tasks();
 		} break;
 		case EditorSettings::NOTIFICATION_EDITOR_SETTINGS_CHANGED: {
 			if (is_visible_in_tree()) {
@@ -2293,45 +2369,12 @@ LimboAIEditor::LimboAIEditor() {
 	favorite_tasks_default.append("BTComment");
 	GLOBAL_DEF(PropertyInfo(Variant::PACKED_STRING_ARRAY, "limbo_ai/behavior_tree/favorite_tasks", PROPERTY_HINT_ARRAY_TYPE, "String"), favorite_tasks_default);
 
-	fav_tasks_hbox = memnew(HBoxContainer);
-	toolbar->add_child(fav_tasks_hbox);
-
-	// The machine's counterpart to the favorite tasks, and in the same place: what the left
-	// end of this row offers is always "the pieces the open document is made of".
-	hsm_tools_hbox = memnew(HBoxContainer);
-	toolbar->add_child(hsm_tools_hbox);
-
-	hsm_add_state_btn = memnew(Button);
-	hsm_add_state_btn->set_text(TTR("Add State"));
-	hsm_add_state_btn->set_tooltip_text(TTR("Add a state inside the selected one, which is what makes it a machine."));
-	hsm_add_state_btn->set_flat(true);
-	hsm_add_state_btn->set_focus_mode(Control::FOCUS_NONE);
-	hsm_tools_hbox->add_child(hsm_add_state_btn);
-
-	hsm_add_machine_btn = memnew(Button);
-	hsm_add_machine_btn->set_text(TTR("Add Machine"));
-	hsm_add_machine_btn->set_tooltip_text(TTR("Add a state that already holds one, so that it is drawn as a machine."));
-	hsm_add_machine_btn->set_flat(true);
-	hsm_add_machine_btn->set_focus_mode(Control::FOCUS_NONE);
-	hsm_tools_hbox->add_child(hsm_add_machine_btn);
-
-	hsm_remove_btn = memnew(Button);
-	hsm_remove_btn->set_text(TTR("Remove"));
-	hsm_remove_btn->set_tooltip_text(TTR("Remove the selected state."));
-	hsm_remove_btn->set_flat(true);
-	hsm_remove_btn->set_focus_mode(Control::FOCUS_NONE);
-	hsm_tools_hbox->add_child(hsm_remove_btn);
-
-	docs_sep = memnew(VSeparator);
-	toolbar->add_child(docs_sep);
-
 	new_btn = memnew(Button);
 	new_btn->set_flat(true);
 	new_btn->set_focus_mode(Control::FOCUS_NONE);
 	toolbar->add_child(new_btn);
 
 	load_btn = memnew(Button);
-	load_btn->set_text(TTR("Load"));
 	load_btn->set_tooltip_text(TTR("Load a behavior tree or state machine from a resource file."));
 	load_btn->set_shortcut(LW_GET_SHORTCUT("limbo_ai/load_behavior_tree"));
 	load_btn->set_flat(true);
@@ -2339,55 +2382,37 @@ LimboAIEditor::LimboAIEditor() {
 	toolbar->add_child(load_btn);
 
 	save_btn = memnew(Button);
-	save_btn->set_text(TTR("Save"));
 	save_btn->set_tooltip_text(TTR("Save the edited document to a resource file."));
 	save_btn->set_shortcut(LW_GET_SHORTCUT("limbo_ai/save_behavior_tree"));
 	save_btn->set_flat(true);
 	save_btn->set_focus_mode(Control::FOCUS_NONE);
 	toolbar->add_child(save_btn);
 
-	script_sep = memnew(VSeparator);
-	toolbar->add_child(script_sep);
+	// Where Misc stands when no tree is open; see _update_toolbar().
+	misc_slot = memnew(HBoxContainer);
+	misc_slot->set_h_size_flags(SIZE_EXPAND | SIZE_SHRINK_END);
+	toolbar->add_child(misc_slot);
 
+	// Made here, placed in the palette once it exists below.
 	new_script_btn = memnew(Button);
-	new_script_btn->set_text(TTR("New Task"));
 	new_script_btn->set_tooltip_text(TTR("Create new task script and edit it."));
 	new_script_btn->set_flat(true);
 	new_script_btn->set_focus_mode(Control::FOCUS_NONE);
-	toolbar->add_child(new_script_btn);
-
-	misc_btn = memnew(MenuButton);
-	misc_btn->set_text(TTR("Misc"));
-	misc_btn->set_flat(true);
-	toolbar->add_child(misc_btn);
 
 	blackboard_btn = memnew(Button);
 	blackboard_btn->set_text(TTR("Blackboard"));
 	blackboard_btn->set_tooltip_text(TTR("Edit the blackboard plan of the open behavior tree in the Inspector."));
 	blackboard_btn->set_flat(true);
 	blackboard_btn->set_focus_mode(Control::FOCUS_NONE);
-	toolbar->add_child(blackboard_btn);
 
-	HBoxContainer *version_hbox = memnew(HBoxContainer);
-	version_hbox->set_h_size_flags(SIZE_EXPAND | SIZE_SHRINK_END);
-	toolbar->add_child(version_hbox);
+	misc_btn = memnew(Button);
+	misc_btn->set_tooltip_text(TTR("Misc"));
+	misc_btn->set_flat(true);
+	misc_btn->set_focus_mode(Control::FOCUS_NONE);
+	misc_slot->add_child(misc_btn);
 
-	TextureRect *logo = memnew(TextureRect);
-	logo->set_stretch_mode(TextureRect::STRETCH_KEEP_ASPECT_CENTERED);
-	logo->set_texture(LimboUtility::get_singleton()->get_task_icon("LimboAI"));
-	version_hbox->add_child(logo);
-
-	version_btn = memnew(LinkButton);
-	version_btn->set_text(TTR("v") + String(GET_LIMBOAI_FULL_VERSION()));
-	version_btn->set_tooltip_text(TTR("Click to copy."));
-	version_btn->set_self_modulate(Color(1, 1, 1, 0.65));
-	version_btn->set_underline_mode(LinkButton::UNDERLINE_MODE_ON_HOVER);
-	version_btn->set_v_size_flags(SIZE_SHRINK_CENTER);
-	version_hbox->add_child(version_btn);
-
-	Control *version_spacer = memnew(Control);
-	version_spacer->set_custom_minimum_size(Size2(2, 0) * EDSCALE);
-	version_hbox->add_child(version_spacer);
+	misc_menu = memnew(PopupMenu);
+	add_child(misc_menu);
 
 	tab_menu = memnew(PopupMenu);
 	add_child(tab_menu);
@@ -2428,6 +2453,15 @@ LimboAIEditor::LimboAIEditor() {
 	task_palette = memnew(TaskPalette());
 	task_palette->hide();
 	hsc->add_child(task_palette);
+	// The tree's own buttons: New Task after the palette's refresh button, Blackboard on the
+	// header row whose far right end Misc takes while a tree is open. Their widths are part of
+	// the palette's minimum width, so the split never squeezes them out of sight.
+	task_palette->get_tool_bar()->add_child(new_script_btn);
+	task_palette->get_header_bar()->add_child(blackboard_btn);
+	Control *palette_header_spacer = memnew(Control);
+	palette_header_spacer->set_h_size_flags(SIZE_EXPAND_FILL);
+	palette_header_spacer->set_mouse_filter(MOUSE_FILTER_IGNORE);
+	task_palette->get_header_bar()->add_child(palette_header_spacer);
 	// What gets put away when the palette is not wanted. In the classic layout that is the
 	// palette itself; the widescreen one wraps it in a column with a heading over it, and
 	// hiding only the palette would leave the heading standing over nothing.
@@ -2452,7 +2486,9 @@ LimboAIEditor::LimboAIEditor() {
 		Control *header_spacer = memnew(Control);
 		header_bar->add_child(header_spacer);
 		header_spacer->set_custom_minimum_size(Size2(6, 0) * EDSCALE);
-		TextureRect *header_logo = Object::cast_to<TextureRect>(logo->duplicate());
+		TextureRect *header_logo = memnew(TextureRect);
+		header_logo->set_stretch_mode(TextureRect::STRETCH_KEEP_ASPECT_CENTERED);
+		header_logo->set_texture(LimboUtility::get_singleton()->get_task_icon("LimboAI"));
 		header_bar->add_child(header_logo);
 		Label *header_title = memnew(Label);
 		header_bar->add_child(header_title);

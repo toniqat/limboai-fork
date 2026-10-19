@@ -28,6 +28,7 @@
 
 #ifdef LIMBOAI_GDEXTENSION
 #include <godot_cpp/classes/button.hpp>
+#include <godot_cpp/classes/h_box_container.hpp>
 #include <godot_cpp/classes/line_edit.hpp>
 #include <godot_cpp/classes/panel_container.hpp>
 #include <godot_cpp/classes/popup_panel.hpp>
@@ -80,7 +81,12 @@ private:
 	} theme_cache;
 
 	LineEdit *filter_edit;
-	// FileSystem-style tree: a "LimboAI" root holding the core categories and a "Project" root
+	// Rows above the tree the editor puts its own buttons in: `header_bar` on top (hidden in the
+	// change-type dialog), `tool_bar` the filter row, whose own buttons come first.
+	HBoxContainer *header_bar;
+	HBoxContainer *tool_bar;
+	// FileSystem-style tree: a "Favorites" root holding the favorite tasks themselves (no
+	// category folders), a "LimboAI" root holding the core categories and a "Project" root
 	// holding the categories of user_task_dirs. Folder items carry FOLDER_PREFIX + their key
 	// ("core/Actions", "user/Combat") as metadata, task items carry their task meta (class name
 	// or script path), which never begins with the prefix.
@@ -179,6 +185,16 @@ public:
 	void refresh();
 	void use_dialog_mode();
 	void clear_filter() { filter_edit->set_text(""); }
+
+	HBoxContainer *get_header_bar() const { return header_bar; }
+	HBoxContainer *get_tool_bar() const { return tool_bar; }
+
+	// The name a task goes by in the palette: the class without its "BT" prefix, or a
+	// script's file name in PascalCase ("DynamicSelector", "KeepLookout").
+	static String get_task_display_name(const String &p_task_meta);
+	// Scrolls to the task's row and selects it: in its category folder rather than under
+	// Favorites, its folders opened, and any filter that hides it cleared first.
+	void reveal_task(const String &p_task_meta);
 
 	TaskPalette();
 	~TaskPalette();

@@ -36,6 +36,27 @@
 
 #endif // LIMBOAI_GDEXTENSION
 
+// The Tree a TaskTree draws its rows in. Only the tooltip differs: a task row's tooltip text
+// is "<task meta>" TOOLTIP_SEPARATOR "<task name>", shown as the task's icon and palette name
+// over the name it has in this tree. Any other tooltip (the file row, warning buttons) is
+// plain text as usual.
+class TaskTreeView : public Tree {
+	GDCLASS(TaskTreeView, Tree);
+
+protected:
+	static void _bind_methods() {}
+
+public:
+	static const char *TOOLTIP_SEPARATOR;
+
+#ifdef LIMBOAI_MODULE
+	virtual Control *make_custom_tooltip(const String &p_text) const override;
+#endif
+#ifdef LIMBOAI_GDEXTENSION
+	virtual Object *_make_custom_tooltip(const String &p_for_text) const override;
+#endif
+};
+
 class TaskTree : public Control {
 	GDCLASS(TaskTree, Control);
 
@@ -118,6 +139,12 @@ public:
 	Ref<BTTask> get_selected() const;
 	Vector<Ref<BTTask>> get_selected_tasks() const;
 	void clear_selection();
+	// The file row (the tree's root item) is the selected one: no task is.
+	bool is_file_item_selected() const { return _is_file_item(tree->get_selected()); }
+	// Collapses or expands every task row that has children; the file row stays open.
+	void set_all_collapsed(bool p_collapsed);
+	// What the palette and LimboUtility know a task by: its script path, or its class name.
+	static String get_task_meta(const Ref<BTTask> &p_task);
 	Rect2 get_selected_probability_rect() const;
 	double get_selected_probability_weight() const;
 	double get_selected_probability_percent() const;

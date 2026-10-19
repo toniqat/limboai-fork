@@ -91,6 +91,12 @@ private:
 		ACTION_MAKE_ROOT,
 		ACTION_EXTRACT_SUBTREE,
 		ACTION_REMOVE,
+		ACTION_SHOW_IN_PALETTE,
+		// The file row's own menu.
+		ACTION_SHOW_IN_FILESYSTEM,
+		ACTION_JUMP_TO_OWNER,
+		ACTION_COLLAPSE_ALL,
+		ACTION_EXPAND_ALL,
 	};
 
 	enum MiscMenu {
@@ -102,7 +108,8 @@ private:
 		MISC_LAYOUT_WIDESCREEN_OPTIMIZED,
 		MISC_PROJECT_SETTINGS,
 		MISC_CREATE_SCRIPT_TEMPLATE,
-		MISC_SEARCH_TREE
+		MISC_SEARCH_TREE,
+		MISC_COPY_VERSION,
 	};
 
 	enum TabMenu {
@@ -184,7 +191,6 @@ private:
 	VBoxContainer *vbox;
 	PanelContainer *tab_bar_panel;
 	HBoxContainer *tab_bar_container;
-	LinkButton *version_btn;
 	TabBar *all_tab_bar;
 	// Clips `tab_bar`, which is laid out at its full width and moved by `tab_scroll`.
 	Control *tab_clip;
@@ -209,7 +215,6 @@ private:
 	// What the All tab shows: every tree and machine file in the project.
 	LimboResourceBrowser *browser;
 	PopupMenu *menu;
-	HBoxContainer *fav_tasks_hbox;
 	TaskPalette *task_palette;
 
 	PopupPanel *probability_popup;
@@ -224,25 +229,19 @@ private:
 	FileDialog *load_dialog;
 	FileDialog *extract_dialog;
 
-	// What a machine's toolbar carries where a tree's carries its favorite tasks. Held as one
-	// container so that showing or hiding the set is one call, the same as `fav_tasks_hbox`.
-	HBoxContainer *hsm_tools_hbox;
-	Button *hsm_add_state_btn;
-	Button *hsm_add_machine_btn;
-	Button *hsm_remove_btn;
-
+	// The toolbar keeps New, Load and Save, icons only. New Task stands in the palette's filter
+	// row and Blackboard on the palette's header row, so they are there only with a tree.
 	Button *new_btn;
 	Button *load_btn;
 	Button *save_btn;
 	Button *new_script_btn;
-	MenuButton *misc_btn;
 	// The open tree's blackboard plan, edited in the Inspector. Only a tree has one.
 	Button *blackboard_btn;
-	// Kept as Control rather than VSeparator only to spare the header an include: nothing
-	// here is done to them but set_visible(). Each stands to the left of a group, so it goes
-	// away with the group -- a separator with nothing on one side of it separates nothing.
-	Control *docs_sep;
-	Control *script_sep;
+	// Icon only, at the far right: of the palette's header row with a tree open, of the toolbar
+	// (`misc_slot`) otherwise. Its menu opens right-aligned under it.
+	Button *misc_btn;
+	PopupMenu *misc_menu;
+	HBoxContainer *misc_slot;
 
 	ConfirmationDialog *rename_dialog;
 	LineEdit *rename_edit;
@@ -263,8 +262,8 @@ private:
 	Ref<BTTask> _create_task_by_class_or_path(const String &p_class_or_path) const;
 	void _add_task_by_class_or_path(const String &p_class_or_path);
 	void _remove_task(const Ref<BTTask> &p_task);
-	void _update_favorite_tasks();
 	void _update_misc_menu();
+	void _popup_misc_menu();
 	void _update_banners();
 	void _new_bt();
 	void _new_hsm();

@@ -13,11 +13,14 @@
 
 #include "task_tree.h"
 
+#include "editor_tooltip.h"
+
 #include "../bt/tasks/composites/bt_probability_selector.h"
 #include "../compat/editor_scale.h"
 #include "../compat/object.h"
 #include "../compat/resource.h"
 #include "../util/limbo_utility.h"
+#include "task_palette.h"
 #include "tree_search.h"
 
 #ifdef LIMBOAI_MODULE
@@ -36,6 +39,36 @@
 #include <godot_cpp/classes/v_box_container.hpp>
 using namespace godot;
 #endif // LIMBOAI_GDEXTENSION
+
+//**** TaskTreeView
+
+const char *TaskTreeView::TOOLTIP_SEPARATOR = "\x1f";
+
+namespace {
+
+Control *_make_task_tooltip(const String &p_text) {
+	if (!p_text.contains(TaskTreeView::TOOLTIP_SEPARATOR)) {
+		return nullptr;
+	}
+	String task_meta = p_text.get_slice(TaskTreeView::TOOLTIP_SEPARATOR, 0);
+	String task_name = p_text.get_slice(TaskTreeView::TOOLTIP_SEPARATOR, 1);
+
+	return limbo_make_tooltip(LimboUtility::get_singleton()->get_task_icon(task_meta), TaskPalette::get_task_display_name(task_meta), "HeaderSmall", task_name);
+}
+
+} // namespace
+
+#ifdef LIMBOAI_MODULE
+Control *TaskTreeView::make_custom_tooltip(const String &p_text) const {
+	Control *tooltip = _make_task_tooltip(p_text);
+	return tooltip != nullptr ? tooltip : Tree::make_custom_tooltip(p_text);
+}
+#endif
+#ifdef LIMBOAI_GDEXTENSION
+Object *TaskTreeView::_make_custom_tooltip(const String &p_for_text) const {
+	return _make_task_tooltip(p_for_text);
+}
+#endif
 
 //**** TaskTree
 
@@ -85,17 +118,10 @@ void TaskTree::_update_item(TreeItem *p_item) {
 		p_item->set_custom_font(0, theme_cache.custom_name_font);
 		// p_item->set_custom_color(0, get_theme_color(StringName("warning_color"), StringName("Editor")));
 	}
-	String type_arg;
-	if (task->get_script() != Variant()) {
-		Ref<Script> sc = task->get_script();
-		if (sc.is_valid()) {
-			type_arg = sc->get_path();
-		}
-	}
-	if (type_arg.is_empty()) {
-		type_arg = task->get_class();
-	}
+	String type_arg = get_task_meta(task);
 	p_item->set_icon(0, LimboUtility::get_singleton()->get_task_icon(type_arg));
+	// Read back by TaskTreeView::_make_custom_tooltip().
+	p_item->set_tooltip_text(0, type_arg + TaskTreeView::TOOLTIP_SEPARATOR + task->get_task_name());
 	p_item->set_icon_max_width(0, 16 * EDSCALE);
 	p_item->set_editable(0, false);
 	p_item->set_collapsed(task->is_displayed_collapsed());
@@ -136,6 +162,41 @@ void TaskTree::_update_tree() {
 	for (const Ref<BTTask> &task : selection) {
 		add_selection(task);
 	}
+}
+
+String TaskTree::get_task_meta(const Ref<BTTask> &p_task) {
+	if (p_task.is_null()) {
+		return String();
+	}
+	Ref<Script> sc = p_task->get_script();
+	if (sc.is_valid() && !sc->get_path().is_empty()) {
+		return sc->get_path();
+	}
+	return p_task->get_class();
+}
+
+void TaskTree::set_all_collapsed(bool p_collapsed) {
+	TreeItem *file_item = tree->get_root();
+	if (file_item == nullptr) {
+		return;
+	}
+	// Each change goes through item_collapsed, so every task keeps its display_collapsed.
+	List<TreeItem *> stack;
+	for (TreeItem *child = file_item->get_first_child(); child != nullptr; child = child->get_next()) {
+		stack.push_back(child);
+	}
+	while (!stack.is_empty()) {
+		TreeItem *item = stack.front()->get();
+		stack.pop_front();
+		if (item->get_child_count() == 0) {
+			continue;
+		}
+		item->set_collapsed(p_collapsed);
+		for (TreeItem *child = item->get_first_child(); child != nullptr; child = child->get_next()) {
+			stack.push_back(child);
+		}
+	}
+	file_item->set_collapsed(false);
 }
 
 TreeItem *TaskTree::_create_file_item() {
@@ -445,14 +506,16 @@ bool TaskTree::_can_drop_data_fw(const Point2 &p_point, const Variant &p_data) c
 
 	int section = tree->get_drop_section_at_position(p_point);
 	TreeItem *item = tree->get_item_at_position(p_point);
-	if (!item || section < -1) {
-		return false;
-	}
 
 	if (from_palette) {
+		// Before the item test: the empty room under the last row is a palette target too.
 		int to_pos = -1;
 		Ref<BTTask> to_task;
 		return _normalize_palette_drop(item, section, to_pos, to_task);
+	}
+
+	if (!item || section < -1) {
+		return false;
 	}
 
 	if (!d.has("tasks") || _is_file_item(item)) {
@@ -470,8 +533,7 @@ bool TaskTree::_can_drop_data_fw(const Point2 &p_point, const Variant &p_data) c
 
 		Ref<BTTask> to_task = item->get_metadata(0);
 		int to_pos = -1;
-		int type = tree->get_drop_section_at_position(p_point);
-		_normalize_drop(item, type, to_pos, to_task);
+		_normalize_drop(item, MIN(section, 1), to_pos, to_task);
 		if (to_task.is_null()) {
 			return false; // Outside root.
 		}
@@ -490,8 +552,6 @@ void TaskTree::_drop_data_fw(const Point2 &p_point, const Variant &p_data) {
 	Dictionary d = p_data;
 	TreeItem *item = tree->get_item_at_position(p_point);
 	int type = tree->get_drop_section_at_position(p_point);
-	ERR_FAIL_NULL(item);
-	ERR_FAIL_COND(type < -1 || type > 1);
 
 	if (String(d.get("type", "")) == "palette_task") {
 		int to_pos = -1;
@@ -501,6 +561,11 @@ void TaskTree::_drop_data_fw(const Point2 &p_point, const Variant &p_data) {
 		}
 		return;
 	}
+
+	ERR_FAIL_NULL(item);
+	// Tree answers 2 for the lower edge of an expanded parent; that is "below" here.
+	type = MIN(type, 1);
+	ERR_FAIL_COND(type < -1);
 	if (!d.has("tasks")) {
 		return;
 	}
@@ -563,16 +628,31 @@ void TaskTree::_normalize_drop(TreeItem *item, int type, int &to_pos, Ref<BTTask
 
 // Where a task dragged in from the palette lands: on an item it becomes the last child, above
 // or below it a sibling (below an expanded parent, its first child). A null `r_to_task` means
-// the tree is empty and the task becomes its root, which only the file item accepts.
+// the tree is empty and the task becomes its root.
+//
+// Every spot of the tree takes a palette task, so the cursor never shows "forbidden" over it:
+// the file row and the empty room under the last row append to the root task, and the root's
+// own upper and lower edges (where a sibling cannot go) put the task inside the root.
 bool TaskTree::_normalize_palette_drop(TreeItem *p_item, int p_section, int &r_to_pos, Ref<BTTask> &r_to_task) const {
-	if (_is_file_item(p_item)) {
-		r_to_task.unref();
-		r_to_pos = -1;
-		return p_section == 0 && bt.is_valid() && bt->get_root_task().is_null();
+	if (bt.is_null()) {
+		return false;
+	}
+	Ref<BTTask> root = bt->get_root_task();
+	if (p_item == nullptr || _is_file_item(p_item)) {
+		r_to_task = root;
+		r_to_pos = root.is_valid() ? root->get_child_count() : -1;
+		return true;
 	}
 	Ref<BTTask> target = p_item->get_metadata(0);
 	if (target.is_null()) {
 		return false;
+	}
+	// Tree answers 2 for the lower edge of an expanded parent; that is "below" here.
+	p_section = MIN(p_section, 1);
+	if (target->get_parent().is_null()) {
+		r_to_task = target;
+		r_to_pos = p_section == 0 ? target->get_child_count() : 0;
+		return true;
 	}
 	switch (p_section) {
 		case 0: {
@@ -747,7 +827,7 @@ TaskTree::TaskTree() {
 	add_child(vbox_container);
 	vbox_container->set_anchors_preset(PRESET_FULL_RECT);
 
-	tree = memnew(Tree);
+	tree = memnew(TaskTreeView);
 	tree->set_v_size_flags(Control::SIZE_EXPAND_FILL);
 	vbox_container->add_child(tree);
 	tree->set_columns(2);
