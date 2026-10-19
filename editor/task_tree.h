@@ -107,6 +107,9 @@ public:
 	// is a snapshot of the machine: the next Ctrl+Z would hand back a state nobody touched
 	// and leave the tree as it was.
 	void set_editable(bool p_editable) { editable = p_editable; }
+	// The darker panel the task tree draws its rows on, as the FileSystem dock's tree does.
+	// Shared so the other trees that show AI content (the HSM state lists) match it.
+	static Ref<StyleBox> make_dark_tree_panel(const Control *p_from);
 	_FORCE_INLINE_ Ref<BehaviorTree> get_bt() const { return bt; }
 	void update_tree() { _update_tree(); }
 	void update_task(const Ref<BTTask> &p_task);

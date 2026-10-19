@@ -130,6 +130,9 @@ private:
 	// one line can stand for more than one row, so what it offers is a list of rows and not
 	// the node menu with a submenu hanging off it.
 	PopupMenu *line_menu;
+	// A right-click on the list's top row, which is the file rather than a state: what can
+	// be done to the machine as a whole, and where the file is.
+	PopupMenu *file_menu;
 	// Which node the open menu is about. The menu outlives the click that opened it.
 	StringName menu_node;
 	// And which machine the open line menu's rows belong to, for the same reason.
@@ -217,7 +220,6 @@ private:
 	// hand back, since it is the thing the rest stand inside.
 	Vector<GraphNode *> _populate_graph(const Ref<HSMStateSpec> &p_machine, int p_depth, int &r_row);
 	void _wire_graph(const Ref<HSMStateSpec> &p_machine);
-	void _populate_list(const Ref<HSMStateSpec> &p_machine, TreeItem *p_parent);
 
 	void _on_list_item_selected();
 	void _on_list_item_activated();
@@ -274,6 +276,8 @@ private:
 	void _on_connection_picked(const StringName &p_from, const StringName &p_to);
 	void _on_connection_menu_requested(const StringName &p_from, const StringName &p_to);
 	void _on_line_menu_pressed(int p_id);
+	void _on_list_item_mouse_selected(const Vector2 &p_pos, int p_button);
+	void _on_file_menu_pressed(int p_id);
 	void _begin_connect_from(const StringName &p_name);
 	void _on_connect_to_requested(const StringName &p_from, const StringName &p_to);
 
@@ -307,6 +311,11 @@ public:
 	// exactly the picture and the picking. Set once, by whoever built the view.
 	void set_read_only(bool p_read_only);
 	bool is_read_only() const { return read_only; }
+
+	// Fills `p_list` under `p_parent` with the states inside `p_machine`, one row each, in the
+	// same colors and icons as the state list. Static so that the LimboAI tab's All view can
+	// show a machine's outline without standing up a whole view for it.
+	static void populate_state_list(Tree *p_list, const Ref<HSMStateSpec> &p_machine, TreeItem *p_parent);
 
 	// What the HSMStateSpec inspector lists for a state of the open file. Answered from the
 	// merged tree, so inherited rows show too. Returns {"outgoing": [...], "incoming": [...]},

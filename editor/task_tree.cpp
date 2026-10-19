@@ -648,10 +648,14 @@ void TaskTree::_do_update_theme_item_cache() {
 	theme_cache.probability_bg->set_bg_color(get_theme_color(LW_NAME(accent_color), LW_NAME(Editor)) * Color(1, 1, 1, 0.25));
 	theme_cache.probability_bg->set_corner_radius_all(12.0 * EDSCALE);
 
+	ADD_STYLEBOX_OVERRIDE(tree, LW_NAME(panel), make_dark_tree_panel(this));
+}
+
+Ref<StyleBox> TaskTree::make_dark_tree_panel(const Control *p_from) {
 	// The tree body sits a step darker than the editor panel around it, as the FileSystem
 	// dock's tree does, so the task hierarchy reads as content rather than as chrome. Built
 	// from the theme's own Tree panel so its margins and borders stay the theme's.
-	Ref<StyleBox> tree_panel = get_theme_stylebox(LW_NAME(panel), LW_NAME(Tree));
+	Ref<StyleBox> tree_panel = p_from->get_theme_stylebox(LW_NAME(panel), LW_NAME(Tree));
 	Ref<StyleBoxFlat> dark_panel;
 	if (Object::cast_to<StyleBoxFlat>(tree_panel.ptr())) {
 		dark_panel = tree_panel->duplicate();
@@ -664,8 +668,8 @@ void TaskTree::_do_update_theme_item_cache() {
 		}
 	}
 	dark_panel->set_draw_center(true);
-	dark_panel->set_bg_color(get_theme_color(LW_NAME(dark_color_2), LW_NAME(Editor)));
-	ADD_STYLEBOX_OVERRIDE(tree, LW_NAME(panel), dark_panel);
+	dark_panel->set_bg_color(p_from->get_theme_color(LW_NAME(dark_color_2), LW_NAME(Editor)));
+	return dark_panel;
 }
 
 void TaskTree::_notification(int p_what) {

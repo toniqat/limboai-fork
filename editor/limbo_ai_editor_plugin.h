@@ -19,6 +19,7 @@
 #include "../hsm/hsm_resource.h"
 #include "hsm_editor_view.h"
 #include "owner_picker.h"
+#include "resource_browser.h"
 #include "task_palette.h"
 #include "task_tree.h"
 #include "tree_search.h"
@@ -38,6 +39,8 @@
 #include "scene/gui/panel_container.h"
 #include "scene/gui/popup.h" // PopupPanel
 #include "scene/gui/popup_menu.h"
+#include "scene/gui/scroll_bar.h"
+#include "scene/gui/texture_rect.h"
 #include "scene/gui/split_container.h"
 #include "scene/gui/tab_bar.h"
 #include "scene/gui/tree.h"
@@ -50,7 +53,9 @@
 #include <godot_cpp/classes/editor_undo_redo_manager.hpp>
 #include <godot_cpp/classes/file_dialog.hpp>
 #include <godot_cpp/classes/h_box_container.hpp>
+#include <godot_cpp/classes/h_scroll_bar.hpp>
 #include <godot_cpp/classes/h_split_container.hpp>
+#include <godot_cpp/classes/texture_rect.hpp>
 #include <godot_cpp/classes/line_edit.hpp>
 #include <godot_cpp/classes/link_button.hpp>
 #include <godot_cpp/classes/menu_button.hpp>
@@ -154,8 +159,22 @@ private:
 	// Tabs hold either a BehaviorTree or a HierarchicalStateMachine: the tab bar is the
 	// one place where "which document am I on" lives, and splitting it per type would
 	// make drilling from a state into its tree cross two tab bars.
+	//
+	// Tab i of `tab_bar` is history[i]. The pinned "All" tab, which is no document, is on
+	// `all_tab_bar`; while it is on, idx_history is -1 even with documents open.
 	Vector<Ref<Resource>> history;
 	int idx_history;
+	// The tab under the mouse, for the close button that only shows on it (and on the
+	// active one). -1 when the mouse is elsewhere.
+	int hovered_tab = -1;
+	// Whether the mouse is on the document tab bar, by its own enter and exit signals.
+	bool tab_bar_mouse_inside = false;
+	// Which document the tab menu acts on: the tab it was opened over, which a right-click
+	// no longer makes the active one. Shortcuts set it to the active document.
+	int tab_menu_idx = -1;
+	// Stands in for the close button on tabs that do not show it, so every document tab
+	// keeps the room the button takes and the tabs do not shift as the mouse moves.
+	Ref<Texture2D> tab_blank_icon;
 	HashMap<Ref<Resource>, TreeSearch::SearchInfo> tab_search_context;
 	bool updating_tabs = false;
 	bool request_update_tabs = false;
@@ -166,7 +185,18 @@ private:
 	PanelContainer *tab_bar_panel;
 	HBoxContainer *tab_bar_container;
 	LinkButton *version_btn;
+	TabBar *all_tab_bar;
+	// Clips `tab_bar`, which is laid out at its full width and moved by `tab_scroll`.
+	Control *tab_clip;
 	TabBar *tab_bar;
+	HScrollBar *tab_hscroll;
+	// Shades the left edge of the strip while tabs are scrolled out past it.
+	TextureRect *tab_scroll_hint;
+	float tab_scroll = 0.0f;
+	bool updating_tab_scroll = false;
+	// The document last brought into view. The strip scrolls to the active tab only when
+	// this changes, so a rebuild does not undo the user's scrolling.
+	Ref<Resource> tab_revealed;
 	PopupMenu *tab_menu;
 	OwnerPicker *owner_picker;
 	HSplitContainer *hsc;
@@ -176,7 +206,8 @@ private:
 	// classic layout; the column it sits in, heading and all, in the widescreen one.
 	Control *palette_holder;
 	VBoxContainer *banners;
-	Panel *usage_hint;
+	// What the All tab shows: every tree and machine file in the project.
+	LimboResourceBrowser *browser;
 	PopupMenu *menu;
 	HBoxContainer *fav_tasks_hbox;
 	TaskPalette *task_palette;
@@ -205,6 +236,8 @@ private:
 	Button *save_btn;
 	Button *new_script_btn;
 	MenuButton *misc_btn;
+	// The open tree's blackboard plan, edited in the Inspector. Only a tree has one.
+	Button *blackboard_btn;
 	// Kept as Control rather than VSeparator only to spare the header an include: nothing
 	// here is done to them but set_visible(). Each stands to the left of a group, so it goes
 	// away with the group -- a separator with nothing on one side of it separates nothing.
@@ -249,6 +282,9 @@ private:
 
 	// Which half of the screen is showing. The tab's type is the only thing that decides.
 	void _show_editor_for(const Ref<Resource> &p_res);
+	// Puts the All tab on: the browser stands where the open document's view stood. The
+	// documents stay loaded, so going back to a tab costs nothing.
+	void _show_all_tab();
 	// And which buttons stand above it, on the same grounds. Called from the two places that
 	// settle what is open -- _show_editor_for() and _disable_editing() -- so the toolbar
 	// cannot disagree with the screen.
@@ -260,14 +296,28 @@ private:
 	void _extract_subtree(const String &p_path);
 	void _replace_task(const Ref<BTTask> &p_task, const Ref<BTTask> &p_by_task);
 
+	void _all_tab_clicked(int p_tab);
 	void _tab_clicked(int p_tab);
+	// Sizes the document strip and scrolls it so tab `p_reveal_tab` is on view (-1: none).
+	void _layout_tab_strip(int p_reveal_tab);
+	void _set_tab_scroll(float p_scroll);
+	void _on_tab_hscroll_changed(double p_value);
+	void _update_tab_strip_hover();
+	void _tab_strip_input(const Ref<InputEvent> &p_event);
 	void _tab_closed(int p_tab);
 	void _update_tabs();
 	void _move_active_tab(int p_to_index);
 	void _tab_input(const Ref<InputEvent> &p_input);
 	void _show_tab_context_menu();
 	void _tab_menu_option_selected(int p_id);
-	void _tab_plan_edited(int p_tab);
+	void _tab_button_pressed(int p_tab);
+	void _tab_hovered(int p_tab);
+	void _tab_bar_mouse_entered();
+	void _tab_bar_mouse_exited();
+	void _update_tab_close_buttons();
+	// Closes every document tab outside [p_keep_from, p_keep_to] (history indices).
+	void _close_tabs_except(int p_keep_from, int p_keep_to);
+	void _on_blackboard_pressed();
 
 	void _reload_modified();
 	void _resave_modified(String _str = "");

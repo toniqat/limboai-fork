@@ -283,6 +283,7 @@ void initialize_limboai_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_INTERNAL_CLASS(HSMGraphEdit);
 		GDREGISTER_INTERNAL_CLASS(HSMNestNode);
 		GDREGISTER_INTERNAL_CLASS(HSMEditorView);
+		GDREGISTER_INTERNAL_CLASS(LimboResourceBrowser);
 		GDREGISTER_INTERNAL_CLASS(EditorInspectorPluginHSMState);
 		GDREGISTER_INTERNAL_CLASS(LimboAIEditor);
 		GDREGISTER_INTERNAL_CLASS(LimboAIEditorPlugin);

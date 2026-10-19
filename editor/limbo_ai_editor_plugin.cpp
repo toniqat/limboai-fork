@@ -48,7 +48,10 @@
 #include "editor/gui/editor_bottom_panel.h"
 #include "editor/script/script_editor_plugin.h"
 #include "editor/settings/project_settings_editor.h"
+#include "scene/gui/scroll_bar.h"
 #include "scene/gui/separator.h"
+#include "scene/gui/texture_rect.h"
+#include "scene/resources/image_texture.h"
 #endif // LIMBOAI_MODULE
 
 #ifdef LIMBOAI_GDEXTENSION
@@ -60,9 +63,14 @@
 #include <godot_cpp/classes/editor_inspector.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/file_system_dock.hpp>
+#include <godot_cpp/classes/h_scroll_bar.hpp>
+#include <godot_cpp/classes/texture_rect.hpp>
+#include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/input.hpp>
 #include <godot_cpp/classes/input_event.hpp>
 #include <godot_cpp/classes/input_event_mouse_button.hpp>
+#include <godot_cpp/classes/input_event_mouse_motion.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/resource_saver.hpp>
 #include <godot_cpp/classes/script.hpp>
@@ -344,17 +352,27 @@ void LimboAIEditor::_update_task_tree(const Ref<BehaviorTree> &p_bt, const Ref<B
 // most of all, since the tab bar is how something gets opened again.
 void LimboAIEditor::_disable_editing() {
 	task_tree->unload();
+	_show_all_tab();
+}
+
+void LimboAIEditor::_show_all_tab() {
+	// Kept for when the tree's tab comes back: the tree stays loaded, but edit_bt() only
+	// remembers the search of the tab it is leaving, and this leaves through no tab.
+	if (task_tree->get_bt().is_valid() && history.has(task_tree->get_bt())) {
+		tab_search_context.insert(task_tree->get_bt(), task_tree->tree_search_get_search_info());
+	}
+	idx_history = -1;
 	palette_holder->hide();
 	task_tree->hide();
 	hsm_view->hide();
-	usage_hint->show();
+	browser->show();
 	_update_toolbar(TOOLBAR_NONE);
 }
 
 void LimboAIEditor::_show_editor_for(const Ref<Resource> &p_res) {
 	bool is_hsm = Object::cast_to<HierarchicalStateMachine>(p_res.ptr()) != nullptr;
 
-	usage_hint->hide();
+	browser->hide();
 	hsm_view->set_visible(is_hsm);
 	task_tree->set_visible(!is_hsm);
 	// The palette builds trees, so it goes with the tree rather than staying as a second
@@ -374,6 +392,7 @@ void LimboAIEditor::_update_toolbar(ToolbarMode p_mode) {
 	// Load stay in all three states -- they are how a document comes to be open at all, and
 	// the empty screen's own hint points at them.
 	save_btn->set_visible(p_mode != TOOLBAR_NONE);
+	blackboard_btn->set_visible(p_mode == TOOLBAR_BT);
 
 	docs_sep->set_visible(p_mode != TOOLBAR_NONE);
 	script_sep->set_visible(p_mode == TOOLBAR_BT);
@@ -457,9 +476,10 @@ void LimboAIEditor::edit_bt(const Ref<BehaviorTree> &p_behavior_tree, bool p_for
 		p_behavior_tree->editor_set_section_unfold("blackboard_plan", true);
 		p_behavior_tree->notify_property_list_changed();
 #endif // LIMBOAI_MODULE
-		// Remember current search info.
-		if (idx_history >= 0 && idx_history < history.size() && task_tree->get_bt().ptr() == history[idx_history].ptr()) {
-			tab_search_context.insert(history[idx_history], task_tree->tree_search_get_search_info());
+		// Remember current search info. Asked of the loaded tree rather than of the active
+		// tab: coming from the All tab, there is no active tab, but the tree is still loaded.
+		if (task_tree->get_bt().is_valid() && history.has(task_tree->get_bt())) {
+			tab_search_context.insert(task_tree->get_bt(), task_tree->tree_search_get_search_info());
 		}
 
 		task_tree->load_bt(p_behavior_tree);
@@ -524,6 +544,7 @@ void LimboAIEditor::set_window_layout(const Ref<ConfigFile> &p_configuration) {
 	}
 
 	hsc->set_split_offset(p_configuration->get_value("LimboAI", "bteditor_hsplit", hsc->get_split_offset()));
+	browser->set_split_offset(p_configuration->get_value("LimboAI", "bteditor_browser_hsplit", browser->get_split_offset()));
 }
 
 void LimboAIEditor::get_window_layout(const Ref<ConfigFile> &p_configuration) {
@@ -539,6 +560,7 @@ void LimboAIEditor::get_window_layout(const Ref<ConfigFile> &p_configuration) {
 		split_offset *= -1;
 	}
 	p_configuration->set_value("LimboAI", "bteditor_hsplit", split_offset);
+	p_configuration->set_value("LimboAI", "bteditor_browser_hsplit", browser->get_split_offset());
 }
 
 void LimboAIEditor::_set_as_dirty(const Ref<Resource> &p_res, bool p_dirty) {
@@ -639,9 +661,11 @@ void LimboAIEditor::_process_shortcut_input(const Ref<InputEvent> &p_event) {
 
 	if (!handled && is_visible_in_tree()) {
 		if (LW_IS_SHORTCUT("limbo_ai/jump_to_owner", p_event)) {
+			tab_menu_idx = idx_history;
 			_tab_menu_option_selected(TAB_JUMP_TO_OWNER);
 			handled = true;
 		} else if (LW_IS_SHORTCUT("limbo_ai/close_tab", p_event)) {
+			tab_menu_idx = idx_history;
 			_tab_menu_option_selected(TAB_CLOSE);
 			handled = true;
 		} else if (LW_IS_SHORTCUT("limbo_ai/editor_save_scene", p_event)) {
@@ -1375,6 +1399,14 @@ void LimboAIEditor::_replace_task(const Ref<BTTask> &p_task, const Ref<BTTask> &
 	}
 }
 
+void LimboAIEditor::_all_tab_clicked(int p_tab) {
+	if (updating_tabs) {
+		return;
+	}
+	_show_all_tab();
+	_update_tabs();
+}
+
 void LimboAIEditor::_tab_clicked(int p_tab) {
 	if (updating_tabs) {
 		return;
@@ -1394,24 +1426,51 @@ void LimboAIEditor::_tab_closed(int p_tab) {
 	}
 
 	history.remove_at(p_tab);
-	idx_history = MIN(idx_history, history.size() - 1);
-	TreeSearch::SearchInfo search_info_opened_tab;
-	if (idx_history < 0) {
+
+	if (history.is_empty()) {
 		_disable_editing();
-	} else {
-		EditorInterface::get_singleton()->edit_resource(history[idx_history]);
-		// A state machine tab never has search context -- only the task tree searches.
-		if (tab_search_context.has(history[idx_history])) {
-			search_info_opened_tab = tab_search_context[history[idx_history]];
+		_update_tabs();
+		return;
+	}
+	if (idx_history < 0) {
+		// The All tab is on, and closing a document beside it leaves it on.
+		_update_tabs();
+		return;
+	}
+	if (p_tab != idx_history) {
+		// A tab closed from its hover button need not be the active one, and then the
+		// active one stays: it only moves down a place if the closed one stood before it.
+		if (p_tab < idx_history) {
+			idx_history--;
 		}
+		_update_tabs();
+		return;
 	}
 
+	idx_history = MIN(idx_history, history.size() - 1);
+	EditorInterface::get_singleton()->edit_resource(history[idx_history]);
+	// A state machine tab never has search context -- only the task tree searches.
+	TreeSearch::SearchInfo search_info_opened_tab;
+	if (tab_search_context.has(history[idx_history])) {
+		search_info_opened_tab = tab_search_context[history[idx_history]];
+	}
 	task_tree->tree_search_set_search_info(search_info_opened_tab);
 	_update_tabs();
 }
 
 void LimboAIEditor::_update_tabs() {
 	updating_tabs = true;
+
+	// Pinned, and never closed: it is how a file that is not open yet gets opened. It has
+	// its own bar so the documents can scroll past it without taking it along.
+	// Icon only; the tooltip still names it.
+	if (all_tab_bar->get_tab_count() == 0) {
+		all_tab_bar->add_tab(String());
+		all_tab_bar->set_tab_tooltip(0, TTR("All behavior trees and state machines in the project."));
+	}
+	all_tab_bar->set_tab_icon(0, get_theme_icon("Folder", "EditorIcons"));
+	all_tab_bar->set_current_tab(idx_history < 0 ? 0 : -1);
+
 	tab_bar->clear_tabs();
 
 	Vector<String> short_names;
@@ -1443,35 +1502,222 @@ void LimboAIEditor::_update_tabs() {
 		}
 		bool is_hsm = Object::cast_to<HierarchicalStateMachine>(history[i].ptr()) != nullptr;
 		tab_bar->add_tab(tab_name, LimboUtility::get_singleton()->get_task_icon(is_hsm ? "LimboHSM" : "BehaviorTree"));
-		if (i == idx_history && !is_hsm) {
-			// The blackboard plan belongs to a behavior tree; a state machine has none.
-			tab_bar->set_tab_button_icon(tab_bar->get_tab_count() - 1, LimboUtility::get_singleton()->get_task_icon("LimboEditBlackboard"));
-		}
 	}
 
+	Ref<Resource> active;
 	if (idx_history >= 0) {
 		ERR_FAIL_INDEX(idx_history, history.size());
 		tab_bar->set_current_tab(idx_history);
+		active = history[idx_history];
+	} else {
+		tab_bar->set_current_tab(-1);
 	}
 
+	// Not asked before the bar is in the tree: the theme reaches it (and this) earlier, and
+	// a mouse position needs a viewport. The tab under the mouse may be a different one
+	// now, after a close from its button.
+	hovered_tab = -1;
+	if (tab_bar_mouse_inside && tab_bar->is_inside_tree()) {
+		Vector2 mouse = tab_bar->get_local_mouse_position();
+		if (Rect2(Vector2(), tab_bar->get_size()).has_point(mouse)) {
+			hovered_tab = tab_bar->get_tab_idx_at_point(mouse);
+		}
+	}
+	_update_tab_close_buttons();
+
 	updating_tabs = false;
+
+	// Brought into view only when a different document becomes the active one. Every
+	// rebuild doing it pulled the strip back to the active tab right after the user had
+	// scrolled away from it (a rescan, a save or a hover rebuilds the tabs too).
+	bool reveal = active.is_valid() && active != tab_revealed;
+	tab_revealed = active;
+	callable_mp(this, &LimboAIEditor::_layout_tab_strip).bind(reveal ? idx_history : -1).call_deferred();
+}
+
+// The close button is the tab's own button slot rather than TabBar's close button: TabBar
+// only makes room for a close button on the tabs that show one, so showing it on hover
+// would widen the tab under the mouse and shift every tab after it. Every document tab
+// carries the slot; a blank icon of the same size fills it where the button is not shown.
+void LimboAIEditor::_update_tab_close_buttons() {
+	Ref<Texture2D> close_icon = tab_bar->get_theme_icon("close", "TabBar");
+	if (close_icon.is_valid() && (tab_blank_icon.is_null() || tab_blank_icon->get_size() != close_icon->get_size())) {
+		Vector2i size = close_icon->get_size();
+		Ref<Image> blank = Image::create_empty(MAX(size.x, 1), MAX(size.y, 1), false, Image::FORMAT_RGBA8);
+		blank->fill(Color(0, 0, 0, 0));
+		tab_blank_icon = ImageTexture::create_from_image(blank);
+	}
+	int current = tab_bar->get_current_tab();
+	for (int i = 0; i < tab_bar->get_tab_count(); i++) {
+		bool shown = i == current || i == hovered_tab;
+		tab_bar->set_tab_button_icon(i, shown ? close_icon : tab_blank_icon);
+	}
+	// Setting an icon makes TabBar work out its hovered tab again from where the mouse is,
+	// without asking whether the mouse is on the bar at all. Over the scroll bar, which lies
+	// on the bar's lower edge, the answer is a tab: the highlight came back after the bar had
+	// already been told the mouse left, and nothing told it again. So it is told again.
+	if (!tab_bar_mouse_inside && tab_bar->is_inside_tree()) {
+		tab_bar->notification(NOTIFICATION_MOUSE_EXIT);
+	}
+}
+
+void LimboAIEditor::_tab_button_pressed(int p_tab) {
+	_tab_closed(p_tab);
+}
+
+void LimboAIEditor::_tab_hovered(int p_tab) {
+	if (!tab_bar_mouse_inside) {
+		// Hovers TabBar reports for a mouse that is not on it; see above.
+		p_tab = -1;
+	}
+	if (hovered_tab == p_tab) {
+		return;
+	}
+	hovered_tab = p_tab;
+	_update_tab_close_buttons();
+}
+
+void LimboAIEditor::_tab_bar_mouse_entered() {
+	tab_bar_mouse_inside = true;
+}
+
+void LimboAIEditor::_tab_bar_mouse_exited() {
+	if (!tab_bar_mouse_inside) {
+		// The exit sent from _update_tab_close_buttons() comes back here as a signal.
+		return;
+	}
+	tab_bar_mouse_inside = false;
+	_tab_hovered(-1);
+	_update_tab_strip_hover();
+}
+
+// The document tabs do not clip and scroll themselves: TabBar would put its own arrow
+// buttons at the end of the strip and jump to the current tab whenever it is rebuilt.
+// Instead the bar is laid out at its full width inside `tab_clip`, which shows a window
+// of it at `tab_scroll`, driven by `tab_hscroll` and the mouse wheel.
+void LimboAIEditor::_layout_tab_strip(int p_reveal_tab) {
+	Size2 bar_min = tab_bar->get_combined_minimum_size();
+	// `tab_clip` is no container, so it does not ask for its child's height by itself.
+	float clip_min_h = MAX(bar_min.y, all_tab_bar->get_combined_minimum_size().y);
+	if (tab_clip->get_custom_minimum_size().y != clip_min_h) {
+		tab_clip->set_custom_minimum_size(Size2(0, clip_min_h));
+	}
+	float full_w = bar_min.x;
+	Size2 clip_size = tab_clip->get_size();
+	tab_bar->set_size(Size2(full_w, clip_size.y));
+	tab_hscroll->set_offset(SIDE_TOP, -tab_hscroll->get_combined_minimum_size().y);
+
+	if (p_reveal_tab >= 0 && p_reveal_tab < tab_bar->get_tab_count()) {
+		Rect2 rect = tab_bar->get_tab_rect(p_reveal_tab);
+		if (rect.position.x < tab_scroll) {
+			tab_scroll = rect.position.x;
+		} else if (rect.position.x + rect.size.x > tab_scroll + clip_size.x) {
+			tab_scroll = rect.position.x + rect.size.x - clip_size.x;
+		}
+	}
+	_set_tab_scroll(tab_scroll);
+}
+
+void LimboAIEditor::_set_tab_scroll(float p_scroll) {
+	float full_w = tab_bar->get_size().x;
+	float clip_w = tab_clip->get_size().x;
+	float max_scroll = MAX(0.0f, full_w - clip_w);
+	tab_scroll = CLAMP(p_scroll, 0.0f, max_scroll);
+	tab_bar->set_position(Vector2(-Math::round(tab_scroll), 0));
+
+	updating_tab_scroll = true;
+	tab_hscroll->set_max(full_w);
+	tab_hscroll->set_page(clip_w);
+	tab_hscroll->set_value(tab_scroll);
+	updating_tab_scroll = false;
+
+	// The same shade the FileSystem dock lays over rows scrolled out of the top: tabs are
+	// hidden to the left of the strip, so the All tab does not stand next to the first one.
+	tab_scroll_hint->set_visible(tab_scroll > 0.5f);
+	_update_tab_strip_hover();
+}
+
+void LimboAIEditor::_on_tab_hscroll_changed(double p_value) {
+	if (updating_tab_scroll) {
+		return;
+	}
+	_set_tab_scroll(p_value);
+}
+
+// Shown only while the mouse is over the document tabs (or the bar itself, which lies over
+// their lower edge), and only when there is something to scroll.
+void LimboAIEditor::_update_tab_strip_hover() {
+	bool hovered = false;
+	if (tab_clip->is_inside_tree() && tab_clip->is_visible_in_tree()) {
+		Vector2 mouse = tab_clip->get_local_mouse_position();
+		hovered = Rect2(Vector2(), tab_clip->get_size()).has_point(mouse);
+	}
+	bool scrollable = tab_bar->get_size().x > tab_clip->get_size().x + 0.5f;
+	tab_hscroll->set_visible(hovered && scrollable);
+}
+
+void LimboAIEditor::_tab_strip_input(const Ref<InputEvent> &p_event) {
+	Ref<InputEventMouseMotion> mm = p_event;
+	if (mm.is_valid()) {
+		_update_tab_strip_hover();
+		return;
+	}
+	Ref<InputEventMouseButton> mb = p_event;
+	if (mb.is_null() || !mb->is_pressed()) {
+		return;
+	}
+	float step = 0.0f;
+	switch (mb->get_button_index()) {
+		case LW_MBTN(WHEEL_UP):
+		case LW_MBTN(WHEEL_LEFT):
+			step = -1.0f;
+			break;
+		case LW_MBTN(WHEEL_DOWN):
+		case LW_MBTN(WHEEL_RIGHT):
+			step = 1.0f;
+			break;
+		default:
+			return;
+	}
+	// A wheel notch moves the strip by about a third of what is on view, so a few notches
+	// cross it without overshooting a short one.
+	float factor = mb->get_factor() > 0.0f ? mb->get_factor() : 1.0f;
+	_set_tab_scroll(tab_scroll + step * factor * MAX(40.0f * EDSCALE, tab_clip->get_size().x / 3.0f));
+	tab_clip->accept_event();
 }
 
 void LimboAIEditor::_move_active_tab(int p_to_index) {
-	ERR_FAIL_INDEX(p_to_index, history.size());
-	if (idx_history == p_to_index) {
+	if (idx_history < 0) {
+		_update_tabs();
 		return;
 	}
-	Ref<Resource> res = history[idx_history];
-	history.remove_at(idx_history);
-	history.insert(p_to_index, res);
-	idx_history = p_to_index;
+	int to_idx = CLAMP(p_to_index, 0, history.size() - 1);
+	if (idx_history != to_idx) {
+		Ref<Resource> res = history[idx_history];
+		history.remove_at(idx_history);
+		history.insert(to_idx, res);
+		idx_history = to_idx;
+	}
 	_update_tabs();
 }
 
 void LimboAIEditor::_tab_input(const Ref<InputEvent> &p_input) {
+	Ref<InputEventMouseMotion> mm = p_input;
+	if (mm.is_valid()) {
+		// TabBar says when the mouse comes onto a tab, not when it leaves one for the empty
+		// end of the bar, so the hovered tab is also read off the motion.
+		_tab_hovered(tab_bar->get_tab_idx_at_point(mm->get_position()));
+		_update_tab_strip_hover();
+		return;
+	}
 	Ref<InputEventMouseButton> mb = p_input;
 	if (mb.is_null()) {
+		return;
+	}
+	if (mb->is_pressed() && (mb->get_button_index() == LW_MBTN(WHEEL_UP) || mb->get_button_index() == LW_MBTN(WHEEL_DOWN) ||
+									mb->get_button_index() == LW_MBTN(WHEEL_LEFT) || mb->get_button_index() == LW_MBTN(WHEEL_RIGHT))) {
+		_tab_strip_input(p_input);
+		tab_bar->accept_event();
 		return;
 	}
 	int tab_idx = tab_bar->get_tab_idx_at_point(tab_bar->get_local_mouse_position());
@@ -1481,6 +1727,7 @@ void LimboAIEditor::_tab_input(const Ref<InputEvent> &p_input) {
 	if (mb->is_pressed() && mb->get_button_index() == LW_MBTN(MIDDLE)) {
 		_tab_closed(tab_idx);
 	} else if (mb->is_pressed() && mb->get_button_index() == LW_MBTN(RIGHT)) {
+		tab_menu_idx = tab_idx;
 		_show_tab_context_menu();
 	}
 }
@@ -1499,16 +1746,17 @@ void LimboAIEditor::_show_tab_context_menu() {
 	tab_menu->popup();
 }
 
+// Acts on tab_menu_idx: the tab the menu was opened over, or the active one for a shortcut.
 void LimboAIEditor::_tab_menu_option_selected(int p_id) {
-	if (history.size() == 0) {
-		// No tabs open, returning.
+	if (tab_menu_idx < 0 || tab_menu_idx >= history.size()) {
+		// No document under the menu (the All tab is on, or the tab is gone).
 		return;
 	}
-	ERR_FAIL_INDEX(idx_history, history.size());
+	int target = tab_menu_idx;
 
 	switch (p_id) {
 		case TAB_SHOW_IN_FILESYSTEM: {
-			Ref<Resource> res = history[idx_history];
+			Ref<Resource> res = history[target];
 			String path = res->get_path();
 			if (!path.is_empty()) {
 				FileSystemDock *dock = EditorInterface::get_singleton()->get_file_system_dock();
@@ -1516,7 +1764,7 @@ void LimboAIEditor::_tab_menu_option_selected(int p_id) {
 			}
 		} break;
 		case TAB_JUMP_TO_OWNER: {
-			Ref<Resource> res = history[idx_history];
+			Ref<Resource> res = history[target];
 			ERR_FAIL_COND(res.is_null());
 			String bt_path = res->get_path();
 			if (!bt_path.is_empty()) {
@@ -1524,36 +1772,61 @@ void LimboAIEditor::_tab_menu_option_selected(int p_id) {
 			}
 		} break;
 		case TAB_CLOSE: {
-			_tab_closed(idx_history);
+			_tab_closed(target);
 		} break;
 		case TAB_CLOSE_OTHER: {
-			Ref<Resource> res = history[idx_history];
-			history.clear();
-			history.append(res);
-			idx_history = 0;
-			_update_tabs();
+			_close_tabs_except(target, target);
 		} break;
 		case TAB_CLOSE_RIGHT: {
-			for (int i = history.size() - 1; i > idx_history; i--) {
-				history.remove_at(i);
-			}
-			_update_tabs();
+			_close_tabs_except(0, target);
 		} break;
 		case TAB_CLOSE_ALL: {
-			history.clear();
-			idx_history = -1;
-			_disable_editing();
-			_update_tabs();
+			_close_tabs_except(0, -1);
 		} break;
 	}
 }
 
-void LimboAIEditor::_tab_plan_edited(int p_tab) {
-	ERR_FAIL_INDEX(p_tab, history.size());
-	// Only a behavior tree carries a blackboard plan; the button is not drawn otherwise.
-	Ref<BehaviorTree> bt = history[p_tab];
-	if (bt.is_valid() && bt->get_blackboard_plan().is_valid()) {
-		EditorInterface::get_singleton()->edit_resource(bt->get_blackboard_plan());
+void LimboAIEditor::_close_tabs_except(int p_keep_from, int p_keep_to) {
+	Ref<Resource> active = (idx_history >= 0 && idx_history < history.size()) ? history[idx_history] : Ref<Resource>();
+
+	for (int i = history.size() - 1; i >= 0; i--) {
+		if (i >= p_keep_from && i <= p_keep_to) {
+			continue;
+		}
+		Ref<Resource> res = history[i];
+		if (res.is_valid() && res->is_connected(LW_NAME(changed), callable_mp(this, &LimboAIEditor::_set_as_dirty))) {
+			res->disconnect(LW_NAME(changed), callable_mp(this, &LimboAIEditor::_set_as_dirty));
+		}
+		tab_search_context.erase(res);
+		history.remove_at(i);
+	}
+
+	if (history.is_empty()) {
+		_disable_editing();
+		_update_tabs();
+		return;
+	}
+	if (active.is_null()) {
+		// The All tab was on, and stays on.
+		_update_tabs();
+		return;
+	}
+	int idx = history.find(active);
+	if (idx != -1) {
+		idx_history = idx;
+		_update_tabs();
+		return;
+	}
+	// The active document went with the rest: the tab the menu was opened over takes its
+	// place. What was kept now starts at index 0.
+	idx_history = CLAMP(p_keep_to - p_keep_from, 0, history.size() - 1);
+	EditorInterface::get_singleton()->edit_resource(history[idx_history]);
+}
+
+void LimboAIEditor::_on_blackboard_pressed() {
+	Ref<BlackboardPlan> plan = get_edited_blackboard_plan();
+	if (plan.is_valid()) {
+		EditorInterface::get_singleton()->edit_resource(plan);
 	}
 }
 
@@ -1805,7 +2078,20 @@ void LimboAIEditor::_notification(int p_what) {
 			tab_bar->connect("tab_close_pressed", callable_mp(this, &LimboAIEditor::_tab_closed));
 			tab_bar->connect(LW_NAME(gui_input), callable_mp(this, &LimboAIEditor::_tab_input));
 			tab_menu->connect(LW_NAME(id_pressed), callable_mp(this, &LimboAIEditor::_tab_menu_option_selected));
-			tab_bar->connect("tab_button_pressed", callable_mp(this, &LimboAIEditor::_tab_plan_edited));
+			tab_bar->connect("tab_button_pressed", callable_mp(this, &LimboAIEditor::_tab_button_pressed));
+			tab_bar->connect("tab_hovered", callable_mp(this, &LimboAIEditor::_tab_hovered));
+			tab_bar->connect(LW_NAME(mouse_exited), callable_mp(this, &LimboAIEditor::_tab_bar_mouse_exited));
+			tab_bar->connect(LW_NAME(mouse_entered), callable_mp(this, &LimboAIEditor::_tab_bar_mouse_entered));
+			browser->connect("owners_requested", callable_mp(owner_picker, &OwnerPicker::pick_and_open_owner_of_resource));
+			all_tab_bar->connect("tab_clicked", callable_mp(this, &LimboAIEditor::_all_tab_clicked));
+			tab_clip->connect(LW_NAME(gui_input), callable_mp(this, &LimboAIEditor::_tab_strip_input));
+			tab_clip->connect(LW_NAME(mouse_exited), callable_mp(this, &LimboAIEditor::_update_tab_strip_hover));
+			tab_clip->connect("resized", callable_mp(this, &LimboAIEditor::_layout_tab_strip).bind(-1));
+			tab_bar->connect("minimum_size_changed", callable_mp(this, &LimboAIEditor::_layout_tab_strip).bind(-1));
+			tab_hscroll->connect("value_changed", callable_mp(this, &LimboAIEditor::_on_tab_hscroll_changed));
+			tab_hscroll->connect(LW_NAME(mouse_exited), callable_mp(this, &LimboAIEditor::_update_tab_strip_hover));
+			blackboard_btn->connect(LW_NAME(pressed), callable_mp(this, &LimboAIEditor::_on_blackboard_pressed));
+			browser->connect("resource_activated", callable_mp(this, &LimboAIEditor::_load_resource));
 			version_btn->connect(LW_NAME(pressed), callable_mp(this, &LimboAIEditor::_copy_version_info));
 
 			EDITOR_FILE_SYSTEM()->connect("resources_reload", callable_mp(this, &LimboAIEditor::_on_resources_reload));
@@ -1821,6 +2107,15 @@ void LimboAIEditor::_notification(int p_what) {
 			save_btn->set_button_icon(get_theme_icon(LW_NAME(Save), LW_NAME(EditorIcons)));
 			new_script_btn->set_button_icon(get_theme_icon(LW_NAME(ScriptCreate), LW_NAME(EditorIcons)));
 			misc_btn->set_button_icon(get_theme_icon(LW_NAME(Tools), LW_NAME(EditorIcons)));
+			blackboard_btn->set_button_icon(LimboUtility::get_singleton()->get_task_icon("LimboEditBlackboard"));
+			// The All tab's folder icon and the close button's size come from the theme.
+			_update_tabs();
+			if (has_theme_icon("scroll_hint_horizontal", "ScrollContainer")) {
+				Ref<Texture2D> hint = get_theme_icon("scroll_hint_horizontal", "ScrollContainer");
+				tab_scroll_hint->set_texture(hint);
+				tab_scroll_hint->set_custom_minimum_size(Size2(hint->get_width(), 0));
+				tab_scroll_hint->set_self_modulate(get_theme_color("scroll_hint_horizontal_color", "ScrollContainer"));
+			}
 
 			// The plugin's own icons for the two resource types, rather than a generic plus:
 			// what these buttons add *is* a state and a machine, and the same two pictures
@@ -1857,7 +2152,7 @@ void LimboAIEditor::_bind_methods() {
 
 LimboAIEditor::LimboAIEditor() {
 	plugin = nullptr;
-	idx_history = 0;
+	idx_history = -1;
 	dummy_history_context = memnew(Object);
 
 	EDITOR_DEF("limbo_ai/editor/prefer_online_documentation", false);
@@ -1940,15 +2235,54 @@ LimboAIEditor::LimboAIEditor() {
 	tab_bar_container = memnew(HBoxContainer);
 	tab_bar_panel->add_child(tab_bar_container);
 
+	// The All tab stands on its own bar, outside the scrolled strip, so it stays at the
+	// left end however far the documents are scrolled.
+	all_tab_bar = memnew(TabBar);
+	all_tab_bar->set_deselect_enabled(true);
+	all_tab_bar->set_select_with_rmb(false);
+	all_tab_bar->set_auto_translate_mode(AUTO_TRANSLATE_MODE_DISABLED);
+	all_tab_bar->set_focus_mode(FocusMode::FOCUS_NONE);
+	tab_bar_container->add_child(all_tab_bar);
+
+	// The window onto the document tabs; see _layout_tab_strip().
+	tab_clip = memnew(Control);
+	tab_clip->set_clip_contents(true);
+	tab_clip->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	tab_clip->set_mouse_filter(MOUSE_FILTER_PASS);
+	tab_bar_container->add_child(tab_clip);
+
 	tab_bar = memnew(TabBar);
-	tab_bar->set_select_with_rmb(true);
+	// Laid out at full width and never clipped by itself: no arrow buttons at its end.
+	tab_bar->set_clip_tabs(false);
+	tab_bar->set_deselect_enabled(true);
+	// A right-click opens the tab menu over the tab without making it the active one.
+	tab_bar->set_select_with_rmb(false);
 	tab_bar->set_drag_to_rearrange_enabled(true);
 	tab_bar->set_max_tab_width(int(EDITOR_GET("interface/scene_tabs/maximum_width")) * EDSCALE);
 	tab_bar->set_auto_translate_mode(AUTO_TRANSLATE_MODE_DISABLED);
-	tab_bar->set_tab_close_display_policy(TabBar::CLOSE_BUTTON_SHOW_ACTIVE_ONLY);
-	tab_bar->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	// Closing goes through each tab's button slot instead; see _update_tab_close_buttons().
+	tab_bar->set_tab_close_display_policy(TabBar::CLOSE_BUTTON_SHOW_NEVER);
 	tab_bar->set_focus_mode(FocusMode::FOCUS_NONE);
-	tab_bar_container->add_child(tab_bar);
+	tab_clip->add_child(tab_bar);
+
+	tab_scroll_hint = memnew(TextureRect);
+	tab_scroll_hint->set_anchor(SIDE_BOTTOM, ANCHOR_END);
+	tab_scroll_hint->set_custom_minimum_size(Size2(16, 0) * EDSCALE);
+	tab_scroll_hint->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
+	tab_scroll_hint->set_stretch_mode(TextureRect::STRETCH_SCALE);
+	tab_scroll_hint->set_mouse_filter(MOUSE_FILTER_IGNORE);
+	tab_scroll_hint->hide();
+	tab_clip->add_child(tab_scroll_hint);
+
+	// Over the lower edge of the tabs rather than on a row of its own, so that showing it
+	// on hover does not push the toolbar down.
+	tab_hscroll = memnew(HScrollBar);
+	tab_hscroll->set_anchor(SIDE_TOP, ANCHOR_END);
+	tab_hscroll->set_anchor(SIDE_RIGHT, ANCHOR_END);
+	tab_hscroll->set_anchor(SIDE_BOTTOM, ANCHOR_END);
+	tab_hscroll->set_focus_mode(FocusMode::FOCUS_NONE);
+	tab_hscroll->hide();
+	tab_clip->add_child(tab_hscroll);
 
 	HBoxContainer *toolbar = memnew(HBoxContainer);
 	vbox->add_child(toolbar);
@@ -2027,6 +2361,13 @@ LimboAIEditor::LimboAIEditor() {
 	misc_btn->set_flat(true);
 	toolbar->add_child(misc_btn);
 
+	blackboard_btn = memnew(Button);
+	blackboard_btn->set_text(TTR("Blackboard"));
+	blackboard_btn->set_tooltip_text(TTR("Edit the blackboard plan of the open behavior tree in the Inspector."));
+	blackboard_btn->set_flat(true);
+	blackboard_btn->set_focus_mode(Control::FOCUS_NONE);
+	toolbar->add_child(blackboard_btn);
+
 	HBoxContainer *version_hbox = memnew(HBoxContainer);
 	version_hbox->set_h_size_flags(SIZE_EXPAND | SIZE_SHRINK_END);
 	toolbar->add_child(version_hbox);
@@ -2073,24 +2414,16 @@ LimboAIEditor::LimboAIEditor() {
 	// inside it.
 	//
 	// `hsc` splits the first two of its *visible* children, so at most two of the four ever
-	// stand at once: tree + palette, machine alone, or the hint alone.
+	// stand at once: tree + palette, machine alone, or the All tab's browser alone.
 	hsm_view = memnew(HSMEditorView);
 	hsm_view->hide();
 	hsc->add_child(hsm_view);
 	hsm_view->connect("hsm_edited", callable_mp(this, &LimboAIEditor::_on_hsm_edited));
 
-	usage_hint = memnew(Panel);
-	usage_hint->set_v_size_flags(SIZE_EXPAND_FILL);
-	usage_hint->set_h_size_flags(SIZE_EXPAND_FILL);
-	hsc->add_child(usage_hint);
-
-	Label *usage_label = memnew(Label);
-	usage_label->set_anchor(SIDE_RIGHT, 1);
-	usage_label->set_anchor(SIDE_BOTTOM, 1);
-	usage_label->set_horizontal_alignment(HORIZONTAL_ALIGNMENT_CENTER);
-	usage_label->set_vertical_alignment(VERTICAL_ALIGNMENT_CENTER);
-	usage_label->set_text(TTR("Create a new or load an existing behavior tree."));
-	usage_hint->add_child(usage_label);
+	// The All tab's view. It takes the place the old "create or load" hint had: with no
+	// document open the All tab is the one on, and the list is how one gets opened.
+	browser = memnew(LimboResourceBrowser);
+	hsc->add_child(browser);
 
 	task_palette = memnew(TaskPalette());
 	task_palette->hide();
@@ -2102,7 +2435,7 @@ LimboAIEditor::LimboAIEditor() {
 
 	// Nothing is open yet, and set_window_layout() may not reopen anything either -- so the
 	// starting state is settled here rather than left to the first document.
-	_update_toolbar(TOOLBAR_NONE);
+	_show_all_tab();
 
 	banners = memnew(VBoxContainer);
 	vbox->add_child(banners);
@@ -2144,7 +2477,7 @@ LimboAIEditor::LimboAIEditor() {
 		task_tree->reparent(editor_vbox);
 		// The machine goes wherever the tree goes: the two take turns in one place.
 		hsm_view->reparent(editor_vbox);
-		usage_hint->reparent(editor_vbox);
+		browser->reparent(editor_vbox);
 		banners->reparent(editor_vbox);
 	}
 

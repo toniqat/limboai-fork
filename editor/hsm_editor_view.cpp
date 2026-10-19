@@ -24,12 +24,17 @@
 #include "core/input/input_event.h"
 #include "core/string/string_name.h"
 #include "scene/gui/control.h"
+#include "editor/docks/filesystem_dock.h"
 #include "scene/resources/style_box_flat.h"
+#include "servers/display_server.h"
 #endif // LIMBOAI_MODULE
 
 #ifdef LIMBOAI_GDEXTENSION
 #include <godot_cpp/classes/control.hpp>
+#include <godot_cpp/classes/display_server.hpp>
+#include <godot_cpp/classes/editor_interface.hpp>
 #include <godot_cpp/classes/editor_undo_redo_manager.hpp>
+#include <godot_cpp/classes/file_system_dock.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/input_event_mouse_button.hpp>
@@ -760,7 +765,7 @@ void HSMEditorView::_wire_graph(const Ref<HSMStateSpec> &p_machine) {
 	}
 }
 
-void HSMEditorView::_populate_list(const Ref<HSMStateSpec> &p_machine, TreeItem *p_parent) {
+void HSMEditorView::populate_state_list(Tree *p_list, const Ref<HSMStateSpec> &p_machine, TreeItem *p_parent) {
 	ERR_FAIL_COND(p_machine.is_null());
 
 	// The initial child leads the list. It carries no mark of its own, so being the top
@@ -785,7 +790,7 @@ void HSMEditorView::_populate_list(const Ref<HSMStateSpec> &p_machine, TreeItem 
 
 	for (int i = 0; i < children.size(); i++) {
 		const Ref<HSMStateSpec> &spec = children[i];
-		TreeItem *item = state_list->create_item(p_parent);
+		TreeItem *item = p_list->create_item(p_parent);
 		item->set_text(0, String(spec->get_state_name()));
 		item->set_metadata(0, Variant(int64_t(spec->get_instance_id())));
 
@@ -823,7 +828,7 @@ void HSMEditorView::_populate_list(const Ref<HSMStateSpec> &p_machine, TreeItem 
 		}
 
 		if (spec->is_machine()) {
-			_populate_list(spec, item);
+			populate_state_list(p_list, spec, item);
 			item->set_collapsed(false);
 		}
 	}
@@ -892,7 +897,9 @@ void HSMEditorView::refresh() {
 	String file = hsm->get_path().get_file();
 	tree_root->set_text(0, file.is_empty() ? String(root->get_state_name()) : file);
 	tree_root->set_metadata(0, Variant(int64_t(root->get_instance_id())));
-	_populate_list(root, tree_root);
+	tree_root->set_icon(0, LimboUtility::get_singleton()->get_task_icon("LimboHSM"));
+	tree_root->set_icon_max_width(0, 16 * EDSCALE);
+	populate_state_list(state_list, root, tree_root);
 
 	updating = false;
 
@@ -1093,6 +1100,74 @@ void HSMEditorView::_on_open_tree_pressed() {
 		return;
 	}
 	EditorInterface::get_singleton()->edit_resource(previewed_tree);
+}
+
+namespace {
+
+enum FileMenu {
+	FILE_MENU_ADD_STATE,
+	FILE_MENU_ADD_MACHINE,
+	FILE_MENU_SHOW_IN_FILESYSTEM,
+	FILE_MENU_COPY_PATH,
+};
+
+} // namespace
+
+void HSMEditorView::_on_list_item_mouse_selected(const Vector2 &p_pos, int p_button) {
+	if (p_button != int(LW_MBTN(RIGHT))) {
+		return;
+	}
+	TreeItem *item = state_list->get_selected();
+	if (item == nullptr) {
+		return;
+	}
+	uint64_t id = uint64_t(int64_t(item->get_metadata(0)));
+	const StringName *name = node_names.getptr(id);
+	if (name != nullptr) {
+		_open_node_menu(*name);
+		return;
+	}
+	if (item != state_list->get_root() || hsm.is_null()) {
+		return;
+	}
+
+	String path = hsm->get_path();
+	file_menu->clear();
+	file_menu->add_icon_item(LimboUtility::get_singleton()->get_task_icon("HSMStateSpec"), TTR("Add State"), FILE_MENU_ADD_STATE);
+	file_menu->set_item_disabled(-1 + file_menu->get_item_count(), read_only);
+	file_menu->add_icon_item(LimboUtility::get_singleton()->get_task_icon("HierarchicalStateMachine"), TTR("Add Machine"), FILE_MENU_ADD_MACHINE);
+	file_menu->set_item_disabled(-1 + file_menu->get_item_count(), read_only);
+	file_menu->add_separator();
+	file_menu->add_icon_item(get_theme_icon("Filesystem", "EditorIcons"), TTR("Show in FileSystem"), FILE_MENU_SHOW_IN_FILESYSTEM);
+	file_menu->set_item_disabled(-1 + file_menu->get_item_count(), path.is_empty());
+	file_menu->add_icon_item(get_theme_icon("ActionCopy", "EditorIcons"), TTR("Copy Path"), FILE_MENU_COPY_PATH);
+	file_menu->set_item_disabled(-1 + file_menu->get_item_count(), path.is_empty());
+	file_menu->set_position(get_screen_position() + get_local_mouse_position());
+	file_menu->reset_size();
+	file_menu->popup();
+}
+
+void HSMEditorView::_on_file_menu_pressed(int p_id) {
+	if (hsm.is_null()) {
+		return;
+	}
+	String path = hsm->get_path();
+	switch (p_id) {
+		case FILE_MENU_ADD_STATE: {
+			_add_child_state(merged_root, false);
+		} break;
+		case FILE_MENU_ADD_MACHINE: {
+			_add_child_state(merged_root, true);
+		} break;
+		case FILE_MENU_SHOW_IN_FILESYSTEM: {
+			if (!path.is_empty()) {
+				EditorInterface::get_singleton()->get_file_system_dock()->navigate_to_path(path.get_slice("::", 0));
+			}
+		} break;
+		case FILE_MENU_COPY_PATH: {
+			DisplayServer::get_singleton()->clipboard_set(path);
+		} break;
+	}
 }
 
 void HSMEditorView::_on_list_item_activated() {
@@ -2149,9 +2224,13 @@ void HSMEditorView::_notification(int p_what) {
 			transition_menu->connect("id_pressed", callable_mp(this, &HSMEditorView::_on_transition_menu_pressed));
 			line_menu->connect("id_pressed", callable_mp(this, &HSMEditorView::_on_line_menu_pressed));
 			tree_open_btn->connect("pressed", callable_mp(this, &HSMEditorView::_on_open_tree_pressed));
+			state_list->connect("item_mouse_selected", callable_mp(this, &HSMEditorView::_on_list_item_mouse_selected));
+			file_menu->connect("id_pressed", callable_mp(this, &HSMEditorView::_on_file_menu_pressed));
 		} break;
 		case NOTIFICATION_THEME_CHANGED: {
 			tree_open_btn->set_button_icon(get_theme_icon(LW_NAME(ExternalLink), LW_NAME(EditorIcons)));
+			// The darker body the task tree has, so a machine's list and a tree read alike.
+			ADD_STYLEBOX_OVERRIDE(state_list, LW_NAME(panel), TaskTree::make_dark_tree_panel(this));
 		} break;
 	}
 }
@@ -2185,6 +2264,8 @@ HSMEditorView::HSMEditorView() {
 	state_list->set_v_size_flags(SIZE_EXPAND_FILL);
 	state_list->set_hide_root(false);
 	state_list->set_columns(1);
+	// A right-click picks the row, then opens the same menu its node on the graph has.
+	state_list->set_allow_rmb_select(true);
 	list_box->add_child(state_list);
 
 	right_split = memnew(HSplitContainer);
@@ -2245,6 +2326,9 @@ HSMEditorView::HSMEditorView() {
 	line_menu = memnew(PopupMenu);
 	line_menu->set_name("LineMenu");
 	add_child(line_menu);
+
+	file_menu = memnew(PopupMenu);
+	add_child(file_menu);
 
 	// ! HACK: the same one the task editor carries. An action's history is worked out from
 	// the objects in it, and the objects here are sub-resources with no path -- a context of
