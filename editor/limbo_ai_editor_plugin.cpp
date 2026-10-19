@@ -2191,6 +2191,13 @@ void LimboAIEditor::_notification(int p_what) {
 			new_script_btn->set_button_icon(get_theme_icon(LW_NAME(ScriptCreate), LW_NAME(EditorIcons)));
 			misc_btn->set_button_icon(get_theme_icon(LW_NAME(Tools), LW_NAME(EditorIcons)));
 			blackboard_btn->set_button_icon(LimboUtility::get_singleton()->get_task_icon("LimboEditBlackboard"));
+			{
+				// The palette is a PanelContainer: its header row starts below the panel's top
+				// content margin, so the toolbar on the other side of the split does too.
+				Ref<StyleBox> palette_panel = task_palette->get_theme_stylebox(LW_NAME(panel));
+				int palette_top = palette_panel.is_valid() ? int(palette_panel->get_margin(SIDE_TOP)) : 0;
+				toolbar_margin->add_theme_constant_override("margin_top", palette_top);
+			}
 			// The All tab's folder icon and the close button's size come from the theme.
 			_update_tabs();
 			if (has_theme_icon("scroll_hint_horizontal", "ScrollContainer")) {
@@ -2360,8 +2367,17 @@ LimboAIEditor::LimboAIEditor() {
 	tab_hscroll->hide();
 	tab_clip->add_child(tab_hscroll);
 
+	// The open document's column: the toolbar on top of whichever body is showing (tree,
+	// machine or the All tab's browser). It is the left pane of `hsc`, so the toolbar spans
+	// only the document and stands level with the palette's header row on the right.
+	VBoxContainer *document_vbox = memnew(VBoxContainer);
+	document_vbox->set_h_size_flags(SIZE_EXPAND_FILL);
+	document_vbox->set_v_size_flags(SIZE_EXPAND_FILL);
+
+	toolbar_margin = memnew(MarginContainer);
+	document_vbox->add_child(toolbar_margin);
 	HBoxContainer *toolbar = memnew(HBoxContainer);
-	vbox->add_child(toolbar);
+	toolbar_margin->add_child(toolbar);
 
 	PackedStringArray favorite_tasks_default;
 	favorite_tasks_default.append("BTSelector");
@@ -2425,30 +2441,30 @@ LimboAIEditor::LimboAIEditor() {
 	hsc->set_v_size_flags(SIZE_EXPAND_FILL);
 	hsc->set_focus_mode(FOCUS_NONE);
 	vbox->add_child(hsc);
+	hsc->add_child(document_vbox);
 
 	task_tree = memnew(TaskTree);
 	task_tree->set_v_size_flags(SIZE_EXPAND_FILL);
 	task_tree->set_h_size_flags(SIZE_EXPAND_FILL);
 	task_tree->hide();
-	hsc->add_child(task_tree);
+	document_vbox->add_child(task_tree);
 
-	// Beside the task tree, not beside `hsc`. The two are the same kind of thing -- the body
-	// of the open document -- and standing in the same place is what lets the toolbar and the
-	// tab bar stay up while they take turns. As a sibling of `hsc` the only way to raise one
-	// was to hide the other's whole container, and the widescreen layout keeps those two rows
-	// inside it.
+	// Beside the task tree, in the same column. The two are the same kind of thing -- the
+	// body of the open document -- and standing in the same place is what lets the toolbar
+	// and the tab bar stay up while they take turns.
 	//
-	// `hsc` splits the first two of its *visible* children, so at most two of the four ever
-	// stand at once: tree + palette, machine alone, or the All tab's browser alone.
+	// Only one of the three bodies shows at a time, so `hsc` splits the document column and
+	// the palette: tree + palette, or the machine or the All tab's browser over the full width
+	// while the palette is put away.
 	hsm_view = memnew(HSMEditorView);
 	hsm_view->hide();
-	hsc->add_child(hsm_view);
+	document_vbox->add_child(hsm_view);
 	hsm_view->connect("hsm_edited", callable_mp(this, &LimboAIEditor::_on_hsm_edited));
 
 	// The All tab's view. It takes the place the old "create or load" hint had: with no
 	// document open the All tab is the one on, and the list is how one gets opened.
 	browser = memnew(LimboResourceBrowser);
-	hsc->add_child(browser);
+	document_vbox->add_child(browser);
 
 	task_palette = memnew(TaskPalette());
 	task_palette->hide();
@@ -2509,11 +2525,8 @@ LimboAIEditor::LimboAIEditor() {
 		VBoxContainer *editor_vbox = memnew(VBoxContainer);
 		hsc->add_child(editor_vbox);
 		tab_bar_panel->reparent(editor_vbox);
-		toolbar->reparent(editor_vbox);
-		task_tree->reparent(editor_vbox);
-		// The machine goes wherever the tree goes: the two take turns in one place.
-		hsm_view->reparent(editor_vbox);
-		browser->reparent(editor_vbox);
+		// The whole document column (toolbar, tree, machine, browser) goes under the tabs.
+		document_vbox->reparent(editor_vbox);
 		banners->reparent(editor_vbox);
 	}
 

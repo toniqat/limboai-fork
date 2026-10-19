@@ -36,6 +36,7 @@
 #include "scene/gui/link_button.h"
 #include "scene/gui/menu_button.h"
 #include "scene/gui/panel.h"
+#include "scene/gui/margin_container.h"
 #include "scene/gui/panel_container.h"
 #include "scene/gui/popup.h" // PopupPanel
 #include "scene/gui/popup_menu.h"
@@ -60,6 +61,7 @@
 #include <godot_cpp/classes/link_button.hpp>
 #include <godot_cpp/classes/menu_button.hpp>
 #include <godot_cpp/classes/panel.hpp>
+#include <godot_cpp/classes/margin_container.hpp>
 #include <godot_cpp/classes/panel_container.hpp>
 #include <godot_cpp/classes/popup_menu.hpp>
 #include <godot_cpp/classes/popup_panel.hpp>
@@ -242,6 +244,9 @@ private:
 	Button *misc_btn;
 	PopupMenu *misc_menu;
 	HBoxContainer *misc_slot;
+	// Holds the toolbar. Its top margin copies the palette panel's, so the toolbar stands
+	// level with the palette's header row across the split.
+	MarginContainer *toolbar_margin;
 
 	ConfirmationDialog *rename_dialog;
 	LineEdit *rename_edit;
