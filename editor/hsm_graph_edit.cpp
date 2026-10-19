@@ -15,17 +15,22 @@
 
 #include "../compat/editor_scale.h"
 #include "../compat/limbo_compat.h"
+#include "hsm_nest_node.h"
 
 #ifdef LIMBOAI_MODULE
 #include "core/input/input_event.h"
 #include "core/math/math_funcs.h"
 #include "scene/main/viewport.h"
+#include "scene/gui/box_container.h"
+#include "scene/resources/style_box.h"
 #endif // LIMBOAI_MODULE
 
 #ifdef LIMBOAI_GDEXTENSION
 #include <godot_cpp/classes/input_event_key.hpp>
 #include <godot_cpp/classes/input_event_mouse_button.hpp>
 #include <godot_cpp/classes/input_event_mouse_motion.hpp>
+#include <godot_cpp/classes/h_box_container.hpp>
+#include <godot_cpp/classes/style_box.hpp>
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/core/math.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
@@ -33,9 +38,14 @@
 
 namespace {
 
-// The arrowhead. Line thickness comes from the theme, so only the length is here.
-const float ARROW_LENGTH = 14.0;
-const float ARROW_SPREAD = 0.46;
+// The arrowhead, a filled triangle. Line thickness comes from the theme, so only the length
+// and the half-angle are here.
+const float ARROW_LENGTH = 16.0;
+const float ARROW_SPREAD = 0.5;
+// Where the line stops, as a share of the head's depth measured from the tip: just past the
+// base, so the two touch without a gap. Any deeper and the line's antialiased edges are drawn
+// across the inside of the head as dark seams.
+const float ARROW_LINE_INSET = 0.92;
 // Between the border and the tip. At zero the head is buried in the node.
 const float EDGE_GAP = 6.0;
 
@@ -162,13 +172,36 @@ int HSMGraphEdit::_hits(const Rect2 &p_from, const Rect2 &p_to, const Vector2 &p
 	return count;
 }
 
-// `p_out` points away from the node, so the wings open that way. Three points -- wing, tip,
-// wing -- keep the head on the same polyline as the body; there is nowhere here to fill a
-// triangle.
-void HSMGraphEdit::_add_head(PackedVector2Array &r_points, const Vector2 &p_tip, const Vector2 &p_out, float p_scale) {
-	r_points.push_back(p_tip + p_out.rotated(ARROW_SPREAD) * ARROW_LENGTH * p_scale);
-	r_points.push_back(p_tip);
-	r_points.push_back(p_tip + p_out.rotated(-ARROW_SPREAD) * ARROW_LENGTH * p_scale);
+// `p_out` points away from the node, so the wings open that way: wing, tip, wing.
+PackedVector2Array HSMGraphEdit::_head(const Vector2 &p_tip, const Vector2 &p_out, float p_scale) {
+	PackedVector2Array points;
+	points.push_back(p_tip + p_out.rotated(ARROW_SPREAD) * ARROW_LENGTH * p_scale);
+	points.push_back(p_tip);
+	points.push_back(p_tip + p_out.rotated(-ARROW_SPREAD) * ARROW_LENGTH * p_scale);
+	return points;
+}
+
+// Filled, with a one pixel antialiased outline: a polygon alone has stair-stepped edges
+// next to the antialiased line it caps.
+void HSMGraphEdit::_draw_head(Control *p_canvas, const PackedVector2Array &p_head, const Color &p_color) {
+	p_canvas->draw_colored_polygon(p_head, p_color);
+	PackedVector2Array outline = p_head;
+	outline.push_back(p_head[0]);
+	p_canvas->draw_polyline(outline, p_color, 1.0, true);
+}
+
+Vector2 HSMGraphEdit::_head_base(const Vector2 &p_tip, const Vector2 &p_out, float p_scale) {
+	return p_tip + p_out * (ARROW_LENGTH * Math::cos(ARROW_SPREAD) * ARROW_LINE_INSET * p_scale);
+}
+
+// The height GraphNode gives its title bar: the row of title controls plus the bar's margins.
+float HSMGraphEdit::_title_height(GraphNode *p_node) {
+	float height = p_node->get_titlebar_hbox()->get_size().y;
+	Ref<StyleBox> bar = p_node->get_theme_stylebox(StringName("titlebar"));
+	if (bar.is_valid()) {
+		height += bar->get_minimum_size().y;
+	}
+	return height;
 }
 
 // The node holding a port at this position. GraphEdit builds the argument as
@@ -198,7 +231,7 @@ GraphNode *HSMGraphEdit::_node_at(const Vector2 &p_position, bool p_input) const
 	return nullptr;
 }
 
-PackedVector2Array HSMGraphEdit::_route(GraphNode *p_from, GraphNode *p_to) const {
+HSMGraphEdit::Route HSMGraphEdit::_route(GraphNode *p_from, GraphNode *p_to) const {
 	// A pair that goes both ways is one line with a head at each end. The two connections
 	// stay and are made to agree on the exact same line instead, so they draw on top of
 	// each other. Agreeing means neither end may decide anything of its own: the pair is
@@ -213,11 +246,11 @@ PackedVector2Array HSMGraphEdit::_route(GraphNode *p_from, GraphNode *p_to) cons
 	Vector2 from_center = from_rect.get_center();
 	Vector2 to_center = to_rect.get_center();
 
-	PackedVector2Array points;
+	Route route;
 	if (from_center.distance_squared_to(to_center) < 1.0) {
-		points.push_back(from_center);
-		points.push_back(to_center);
-		return points;
+		route.line.push_back(from_center);
+		route.line.push_back(to_center);
+		return route;
 	}
 
 	// Only the nodes this edge does not belong to. Its own ends are always "crossed",
@@ -235,6 +268,10 @@ PackedVector2Array HSMGraphEdit::_route(GraphNode *p_from, GraphNode *p_to) cons
 		}
 		Rect2 rect = _rect_of(node);
 		if (rect.encloses(from_rect) || rect.encloses(to_rect)) {
+			// Its title bar still is: the bar is drawn over the lines, and an edge leaving the
+			// box through it would vanish there. Not grown -- the states inside stand just
+			// below the bar, and their own borders would count as crossing it.
+			blockers.push_back(Rect2(rect.position, Size2(rect.size.x, _title_height(node))));
 			continue;
 		}
 		blockers.push_back(rect.grow(CLEARANCE));
@@ -264,19 +301,103 @@ PackedVector2Array HSMGraphEdit::_route(GraphNode *p_from, GraphNode *p_to) cons
 	// towards the control point, taken to the border.
 	Vector2 from_dir = (best - from_center).normalized();
 	Vector2 to_dir = (best - to_center).normalized();
+	route.tip_node = p_to;
+	route.tip = _edge_point(to_rect, to_dir) + to_dir * EDGE_GAP;
+	route.tip_out = to_dir;
 	Vector2 p0 = _edge_point(from_rect, from_dir) + from_dir * EDGE_GAP;
-	Vector2 p1 = _edge_point(to_rect, to_dir) + to_dir * EDGE_GAP;
-
 	if (both) {
-		_add_head(points, p0, from_dir);
+		route.tail_node = p_from;
+		route.tail = p0;
+		route.tail_out = from_dir;
+		p0 = _head_base(p0, from_dir, 1.0);
 	}
+	// The ends sit on the rays from each center through the control point, so the curve
+	// arrives along the same line the head points down.
+	Vector2 p1 = _head_base(route.tip, to_dir, 1.0);
 	for (int s = 0; s <= CURVE_SEGMENTS; s++) {
 		float t = float(s) / float(CURVE_SEGMENTS);
 		float u = 1.0 - t;
-		points.push_back(p0 * (u * u) + best * (2.0 * u * t) + p1 * (t * t));
+		route.line.push_back(p0 * (u * u) + best * (2.0 * u * t) + p1 * (t * t));
 	}
-	_add_head(points, p1, to_dir);
-	return points;
+	return route;
+}
+
+// Under GraphEdit's Line2D children, in their coordinates: unscaled graph space times the
+// zoom, the layer itself being shifted by the scroll. First the machines' boxes, outermost
+// first (the child order the view keeps them in), then every head.
+void HSMGraphEdit::_draw_under_lines() {
+	float zoom = _zoom();
+	Ref<StyleBox> panel = get_theme_stylebox(StringName("panel"), StringName("GraphNode"));
+	Ref<StyleBox> panel_selected = get_theme_stylebox(StringName("panel_selected"), StringName("GraphNode"));
+	for (int i = 0; i < get_child_count(); i++) {
+		HSMNestNode *nest = Object::cast_to<HSMNestNode>(get_child(i));
+		if (nest == nullptr || !nest->is_visible()) {
+			continue;
+		}
+		Ref<StyleBox> box = nest->is_selected() && panel_selected.is_valid() ? panel_selected : panel;
+		if (box.is_null()) {
+			continue;
+		}
+		Rect2 rect = _rect_of(nest);
+		float title = _title_height(nest);
+		lines_layer->draw_set_transform(rect.position * zoom, 0.0, Vector2(zoom, zoom));
+		lines_layer->draw_style_box(box, Rect2(0.0, title, rect.size.x, rect.size.y - title));
+	}
+	lines_layer->draw_set_transform(Vector2(), 0.0, Vector2(1, 1));
+
+	Color activity_color = get_theme_color(StringName("activity"), StringName("GraphEdit"));
+	TypedArray<Dictionary> list = get_connection_list();
+	for (int i = 0; i < list.size(); i++) {
+		Dictionary c = list[i];
+		GraphNode *from = Object::cast_to<GraphNode>(get_node_or_null(NodePath(String(StringName(c["from_node"])))));
+		GraphNode *to = Object::cast_to<GraphNode>(get_node_or_null(NodePath(String(StringName(c["to_node"])))));
+		if (from == nullptr || to == nullptr || from == to || !from->is_visible() || !to->is_visible()) {
+			continue;
+		}
+		Route route = _route(from, to);
+		if (route.tip_node == nullptr) {
+			continue;
+		}
+		const float *amount = activity.getptr(String(from->get_name()) + "\n" + String(to->get_name()));
+		float lit = amount != nullptr ? *amount : 0.0f;
+		// The line's own colors: GraphEdit paints a gradient from this connection's source color
+		// at the line's first point to its destination color at the last. A pair going both ways
+		// shares one route, so for the second of the two the first point is at its destination;
+		// colored by the connection rather than by the route's ends, each head matches the line
+		// it caps, and the pair's later connection is drawn last here as it is there.
+		Color first_color = from->get_slot_color_right(0).lerp(activity_color, lit);
+		Color last_color = to->get_slot_color_left(0).lerp(activity_color, lit);
+		_draw_head(lines_layer, _head(route.tip * zoom, route.tip_out, zoom), last_color);
+		if (route.tail_node != nullptr) {
+			_draw_head(lines_layer, _head(route.tail * zoom, route.tail_out, zoom), first_color);
+		}
+	}
+}
+
+void HSMGraphEdit::_on_node_selection_changed(Node *p_node) {
+	// A selected box is painted with the selected panel, and nothing else redraws the layer.
+	if (Object::cast_to<HSMNestNode>(p_node) != nullptr) {
+		lines_layer->queue_redraw();
+	}
+}
+
+void HSMGraphEdit::clear_edges() {
+	activity.clear();
+	clear_connections();
+}
+
+void HSMGraphEdit::set_edge_activity(const StringName &p_from, const StringName &p_to, float p_amount) {
+	activity[String(p_from) + "\n" + String(p_to)] = p_amount;
+	set_connection_activity(p_from, 0, p_to, 0, p_amount);
+	if (lines_layer != nullptr) {
+		lines_layer->queue_redraw();
+	}
+}
+
+void HSMGraphEdit::settle_layers() {
+	if (lines_layer != nullptr && lines_layer->get_parent() == this) {
+		move_child(lines_layer, 0);
+	}
 }
 
 // ── Aiming a new edge at a node ───────────────────────────────────────────────
@@ -376,12 +497,10 @@ void HSMGraphEdit::_draw_pending() {
 	Color color = hovered.is_empty() ? COLOR_PENDING : (ok ? COLOR_TARGET_OK : COLOR_TARGET_NO);
 
 	Vector2 start = _edge_point(from_rect, dir) + dir * EDGE_GAP * zoom;
-	overlay->draw_line(start, mouse, color, width, true);
-	PackedVector2Array head;
 	// The tip is at the cursor and the wings open back down the line, which is the same
 	// shape a finished edge ends in -- the gesture looks like what it is about to make.
-	_add_head(head, mouse, -dir, zoom);
-	overlay->draw_polyline(head, color, width, true);
+	_draw_head(overlay, _head(mouse, -dir, zoom), color);
+	overlay->draw_line(start, _head_base(mouse, -dir, zoom), color, width, true);
 
 	if (!hovered.is_empty()) {
 		GraphNode *node = Object::cast_to<GraphNode>(get_node_or_null(NodePath(String(hovered))));
@@ -420,12 +539,12 @@ void HSMGraphEdit::_mark_pick(float p_activity) {
 		return;
 	}
 	if (is_node_connected(picked_from, 0, picked_to, 0)) {
-		set_connection_activity(picked_from, 0, picked_to, 0, p_activity);
+		set_edge_activity(picked_from, picked_to, p_activity);
 	}
 	// Both ways when the pair goes both ways. The two are drawn as one line, one on top of
 	// the other, so lighting up only one of them leaves the plain one covering it.
 	if (is_node_connected(picked_to, 0, picked_from, 0)) {
-		set_connection_activity(picked_to, 0, picked_from, 0, p_activity);
+		set_edge_activity(picked_to, picked_from, p_activity);
 	}
 }
 
@@ -553,7 +672,7 @@ PackedVector2Array HSMGraphEdit::_get_connection_line(const Vector2 &p_from_posi
 		if (from == nullptr || to == nullptr || from == to) {
 			continue;
 		}
-		PackedVector2Array points = _route(from, to);
+		PackedVector2Array points = _route(from, to).line;
 		if (scale != 1.0) {
 			for (int p = 0; p < points.size(); p++) {
 				points.set(p, points[p] * scale);
@@ -602,6 +721,15 @@ HSMGraphEdit::HSMGraphEdit() {
 	add_child(overlay);
 
 	connect("scroll_offset_changed", callable_mp(this, &HSMGraphEdit::_on_scroll_offset_changed));
+
+	// Made by GraphEdit's constructor, which has already run. Without it there are no boxes
+	// or heads, and the plain lines still work.
+	lines_layer = Object::cast_to<Control>(get_node_or_null(NodePath("_connection_layer")));
+	if (lines_layer != nullptr) {
+		lines_layer->connect("draw", callable_mp(this, &HSMGraphEdit::_draw_under_lines));
+		connect("node_selected", callable_mp(this, &HSMGraphEdit::_on_node_selection_changed));
+		connect("node_deselected", callable_mp(this, &HSMGraphEdit::_on_node_selection_changed));
+	}
 }
 
 #endif // ! TOOLS_ENABLED

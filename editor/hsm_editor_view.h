@@ -28,6 +28,7 @@
 #include "scene/gui/graph_node.h"
 #include "scene/gui/label.h"
 #include "scene/gui/split_container.h"
+#include "scene/animation/tween.h"
 #include "scene/gui/tree.h"
 #endif // LIMBOAI_MODULE
 
@@ -44,6 +45,7 @@
 #include <godot_cpp/classes/popup_menu.hpp>
 #include <godot_cpp/classes/texture2d.hpp>
 #include <godot_cpp/classes/tree.hpp>
+#include <godot_cpp/classes/tween.hpp>
 #include <godot_cpp/classes/v_box_container.hpp>
 #include <godot_cpp/templates/hash_map.hpp>
 #include <godot_cpp/templates/vector.hpp>
@@ -116,6 +118,8 @@ private:
 	// that took the graph's place would hide where it sits.
 	HSplitContainer *right_split;
 	HSMGraphEdit *graph;
+	// The glide a double-clicked list row starts; a second one cuts the first short.
+	Ref<Tween> focus_tween;
 	// The tree the picked state holds. Read-only -- see TaskTree::set_editable().
 	VBoxContainer *tree_box;
 	Label *tree_title;
@@ -191,6 +195,7 @@ private:
 
 	void _hide_ports(GraphNode *p_node);
 	void _trim_body(GraphNode *p_node);
+	void _hollow_nest(GraphNode *p_node);
 	GraphNode *_make_node(const Ref<HSMStateSpec> &p_state, const Ref<HSMStateSpec> &p_machine, int p_depth, int p_row, bool p_nests, Control **r_content);
 	GraphNode *_make_anystate_node(const Ref<HSMStateSpec> &p_machine, int p_depth, int p_row);
 	// Where a node stands. A nest's own size only reaches the node a layout pass later, so
@@ -223,6 +228,7 @@ private:
 
 	void _on_list_item_selected();
 	void _on_list_item_activated();
+	void _focus_graph_on(const StringName &p_name);
 	void _on_graph_node_selected(Node *p_node);
 	void _on_graph_node_gui_input(const Ref<InputEvent> &p_event, const StringName &p_name);
 	void _on_graph_end_node_move();

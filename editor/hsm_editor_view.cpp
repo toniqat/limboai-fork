@@ -25,6 +25,7 @@
 #include "core/string/string_name.h"
 #include "scene/gui/control.h"
 #include "editor/docks/filesystem_dock.h"
+#include "scene/animation/tween.h"
 #include "scene/resources/style_box_flat.h"
 #include "servers/display_server.h"
 #endif // LIMBOAI_MODULE
@@ -38,8 +39,10 @@
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/input_event_mouse_button.hpp>
+#include <godot_cpp/classes/property_tweener.hpp>
 #include <godot_cpp/classes/style_box_flat.hpp>
 #include <godot_cpp/classes/tree_item.hpp>
+#include <godot_cpp/classes/tween.hpp>
 #include <godot_cpp/classes/undo_redo.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #endif // LIMBOAI_GDEXTENSION
@@ -51,6 +54,9 @@ const Color COLOR_PLAIN = Color(0.55, 0.62, 0.72);
 const Color COLOR_MACHINE = Color(0.42, 0.72, 0.55);
 const Color COLOR_TREE = Color(0.66, 0.50, 0.82);
 const Color COLOR_ANYSTATE = Color(0.78, 0.62, 0.35);
+
+// How long a double-clicked list row takes to glide its node into the middle of the graph.
+const float FOCUS_GLIDE_TIME = 0.35;
 
 const int COLUMN_WIDTH = 300;
 const int ROW_HEIGHT = 120;
@@ -294,6 +300,36 @@ void HSMEditorView::_trim_body(GraphNode *p_node) {
 	trimming = false;
 }
 
+// A machine's box is painted by the graph under its lines (HSMGraphEdit::_draw_under_lines), so
+// the lines between the states inside it show over it. What the node itself still draws is its
+// title bar, which covers any line running beneath it. Its panels stay in place, emptied, so
+// the margins they lay the body out with are unchanged.
+void HSMEditorView::_hollow_nest(GraphNode *p_node) {
+	if (trimming) {
+		return;
+	}
+	trimming = true;
+	const char *panels[] = { "panel", "panel_selected" };
+	for (int i = 0; i < 2; i++) {
+		REMOVE_STYLEBOX_OVERRIDE(p_node, StringName(panels[i]));
+	}
+	for (int i = 0; i < 2; i++) {
+		StringName name = StringName(panels[i]);
+		if (!p_node->has_theme_stylebox(name, "GraphNode")) {
+			continue;
+		}
+		Ref<StyleBoxFlat> hollow = p_node->get_theme_stylebox(name, "GraphNode")->duplicate();
+		if (hollow.is_null()) {
+			continue;
+		}
+		hollow->set_draw_center(false);
+		hollow->set_border_color(Color(0, 0, 0, 0));
+		hollow->set_shadow_size(0);
+		ADD_STYLEBOX_OVERRIDE(p_node, name, hollow);
+	}
+	trimming = false;
+}
+
 // A machine that holds states is drawn as a node with those states standing *inside* it,
 // which is what `p_nests` asks for. Depth alone does not say what is in what: one column
 // further right and unrelated look the same, so the states of `Combat` read as siblings of
@@ -358,6 +394,7 @@ GraphNode *HSMEditorView::_make_node(const Ref<HSMStateSpec> &p_state, const Ref
 		if (r_content != nullptr) {
 			*r_content = spacer;
 		}
+		node->connect("theme_changed", callable_mp(this, &HSMEditorView::_hollow_nest).bind(node));
 	} else {
 		// Everywhere else the body is nothing, and nothing is drawn no taller than nothing.
 		node->connect("theme_changed", callable_mp(this, &HSMEditorView::_trim_body).bind(node));
@@ -387,7 +424,16 @@ GraphNode *HSMEditorView::_make_anystate_node(const Ref<HSMStateSpec> &p_machine
 	GraphNode *node = memnew(GraphNode);
 	node->set_draggable(!read_only);
 	node->set_name(_anystate_node_name_for(p_machine));
-	node->set_title(String::utf8("✱ ANYSTATE"));
+	// The asterisk alone, centered: the word repeated what the icon already says, and made
+	// the node as wide as a state it is not. The name is still there on hover.
+	node->set_title(String::utf8("✱"));
+	node->set_tooltip_text(TTR("ANYSTATE: its transitions leave from whichever state is active."));
+	if (node->get_titlebar_hbox()->get_child_count() > 0) {
+		Label *title = Object::cast_to<Label>(node->get_titlebar_hbox()->get_child(0));
+		if (title != nullptr) {
+			title->set_horizontal_alignment(HORIZONTAL_ALIGNMENT_CENTER);
+		}
+	}
 
 	// It used to say "no state is being left" here. That is not what it *is*, it is what
 	// cannot be done to it, and where that belongs is the moment someone tries: aiming an
@@ -624,8 +670,9 @@ void HSMEditorView::_update_nest_hole(const Nest &p_nest) {
 
 // Outermost first, because each move puts one in front of the ones moved before it and
 // `nests` is deepest first. What lands above them all is everything that is not a nest --
-// the states themselves -- and GraphEdit's own `connections_layer`, so the lines stay on top
-// of the boxes and under nothing.
+// the states themselves. GraphEdit's own `connections_layer` then goes below the boxes: the
+// graph paints each box's body on it, under the lines, and the box's opaque title bar is
+// drawn over every line that runs beneath it.
 void HSMEditorView::_enforce_nest_order() {
 	for (int i = 0; i < nests.size(); i++) {
 		GraphNode *node = nests[i].node;
@@ -633,6 +680,8 @@ void HSMEditorView::_enforce_nest_order() {
 			graph->move_child(node, 0);
 		}
 	}
+	// And the lines under even the outermost box, which now only draws its title bar.
+	graph->settle_layers();
 }
 
 void HSMEditorView::_on_nest_raised() {
@@ -843,7 +892,7 @@ void HSMEditorView::refresh() {
 	// Before the connections go, not after: dropping the pick turns its highlight back off,
 	// and there is nothing left to turn off once the list has been emptied.
 	graph->clear_picked_connection();
-	graph->clear_connections();
+	graph->clear_edges();
 	// Only the elements we put there. GraphEdit keeps a non-internal `connections_layer`
 	// child of its own (and HSMGraphEdit an `overlay`), and removing either takes
 	// the lines with it -- after which every node move errors out. Neither is a
@@ -1170,8 +1219,40 @@ void HSMEditorView::_on_file_menu_pressed(int p_id) {
 	}
 }
 
+// A double-click on a row brings its node into view: picking it already selected the node and
+// showed its tree, but on a big machine the node may be off screen.
 void HSMEditorView::_on_list_item_activated() {
 	_preview_tree(_selected_spec());
+	TreeItem *item = state_list->get_selected();
+	if (item == nullptr) {
+		return;
+	}
+	const StringName *name = node_names.getptr(uint64_t(int64_t(item->get_metadata(0))));
+	if (name != nullptr) {
+		_focus_graph_on(*name);
+	}
+}
+
+// Glides rather than jumps, so the eye can follow where the graph went. Centered on the node
+// at the current zoom: a node's screen position is `position_offset * zoom - scroll_offset`.
+void HSMEditorView::_focus_graph_on(const StringName &p_name) {
+	GraphNode *node = Object::cast_to<GraphNode>(graph->get_node_or_null(NodePath(String(p_name))));
+	if (node == nullptr) {
+		return;
+	}
+	float zoom = graph->get_zoom() > 0.0 ? graph->get_zoom() : 1.0;
+	Size2 size = node->get_size();
+	if (size.x < 1.0 || size.y < 1.0) {
+		size = node->get_combined_minimum_size();
+	}
+	Vector2 target = (node->get_position_offset() + size * 0.5) * zoom - graph->get_size() * 0.5;
+	if (focus_tween.is_valid()) {
+		focus_tween->kill();
+	}
+	focus_tween = graph->create_tween();
+	focus_tween->set_trans(Tween::TRANS_CUBIC);
+	focus_tween->set_ease(Tween::EASE_OUT);
+	focus_tween->tween_property(graph, NodePath("scroll_offset"), target, FOCUS_GLIDE_TIME);
 }
 
 void HSMEditorView::_on_graph_node_gui_input(const Ref<InputEvent> &p_event, const StringName &p_name) {
@@ -2185,12 +2266,12 @@ void HSMEditorView::_fade_pulses(double p_delta) {
 	for (int i = pulses.size() - 1; i >= 0; i--) {
 		float amount = pulses[i].amount - float(p_delta) / PULSE_SECONDS;
 		if (amount <= 0.0) {
-			graph->set_connection_activity(pulses[i].from, 0, pulses[i].to, 0, 0.0);
+			graph->set_edge_activity(pulses[i].from, pulses[i].to, 0.0);
 			pulses.remove_at(i);
 			continue;
 		}
 		pulses.write[i].amount = amount;
-		graph->set_connection_activity(pulses[i].from, 0, pulses[i].to, 0, amount);
+		graph->set_edge_activity(pulses[i].from, pulses[i].to, amount);
 	}
 	if (pulses.is_empty()) {
 		set_process(false);
