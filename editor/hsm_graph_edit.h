@@ -18,6 +18,7 @@
 #include "core/input/input_event.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/vector.h"
+#include "scene/2d/node_2d.h"
 #include "scene/gui/control.h"
 #include "scene/gui/graph_edit.h"
 #include "scene/gui/graph_node.h"
@@ -25,6 +26,7 @@
 
 #ifdef LIMBOAI_GDEXTENSION
 #include <godot_cpp/classes/control.hpp>
+#include <godot_cpp/classes/node2d.hpp>
 #include <godot_cpp/classes/graph_edit.hpp>
 #include <godot_cpp/classes/graph_node.hpp>
 #include <godot_cpp/classes/input_event.hpp>
@@ -89,8 +91,10 @@ private:
 	// lands under them, and it is redrawn exactly when they are rebuilt.
 	Control *lines_layer = nullptr;
 	// The lines layer's internal child at the back, drawn after its Line2D children: the
-	// heads go here, over the lines and still under every node.
-	Control *heads_layer = nullptr;
+	// heads go here, over the lines and still under every node. A Node2D, not a Control: a
+	// Control is culled by its own rect, and a zero-size one at the graph origin made every
+	// head vanish once that origin was scrolled out of view (easily, zoomed in).
+	Node2D *heads_layer = nullptr;
 	// What set_connection_activity() was last told, per from/to pair, so a head is tinted the
 	// way its line is. GraphEdit keeps the amount but does not hand it back.
 	HashMap<String, float> activity;
@@ -138,7 +142,7 @@ private:
 	static PackedVector2Array _head(const Vector2 &p_tip, const Vector2 &p_out, float p_scale);
 	// Where the line stops short of a head's tip: inside the triangle, so the head covers it.
 	static Vector2 _head_base(const Vector2 &p_tip, const Vector2 &p_out, float p_scale);
-	static void _draw_head(Control *p_canvas, const PackedVector2Array &p_head, const Color &p_color);
+	static void _draw_head(CanvasItem *p_canvas, const PackedVector2Array &p_head, const Color &p_color);
 	static float _title_height(GraphNode *p_node);
 	Route _route(GraphNode *p_from, GraphNode *p_to) const;
 	void _draw_under_lines();

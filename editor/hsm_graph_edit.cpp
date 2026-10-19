@@ -206,7 +206,7 @@ PackedVector2Array HSMGraphEdit::_head(const Vector2 &p_tip, const Vector2 &p_ou
 
 // Filled, with a one pixel antialiased outline: a polygon alone has stair-stepped edges
 // next to the antialiased line it caps.
-void HSMGraphEdit::_draw_head(Control *p_canvas, const PackedVector2Array &p_head, const Color &p_color) {
+void HSMGraphEdit::_draw_head(CanvasItem *p_canvas, const PackedVector2Array &p_head, const Color &p_color) {
 	p_canvas->draw_colored_polygon(p_head, p_color);
 	PackedVector2Array outline = p_head;
 	outline.push_back(p_head[0]);
@@ -769,8 +769,7 @@ HSMGraphEdit::HSMGraphEdit() {
 	if (lines_layer != nullptr) {
 		lines_layer->connect("draw", callable_mp(this, &HSMGraphEdit::_draw_under_lines));
 		// Internal and at the back, so it is drawn after every Line2D GraphEdit adds later.
-		heads_layer = memnew(Control);
-		heads_layer->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+		heads_layer = memnew(Node2D);
 		lines_layer->add_child(heads_layer, false, Node::INTERNAL_MODE_BACK);
 		heads_layer->connect("draw", callable_mp(this, &HSMGraphEdit::_draw_heads));
 		connect("node_selected", callable_mp(this, &HSMGraphEdit::_on_node_selection_changed));
