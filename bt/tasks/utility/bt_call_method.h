@@ -27,6 +27,10 @@ private:
 	TypedArray<BBVariant> args;
 	bool include_delta = false;
 	StringName result_var;
+	// Off: the call is a step and the task always succeeds, as upstream. On: the call is the
+	// question, and a bool result is the answer (true SUCCESS, false FAILURE), so a helper
+	// that answers yes or no needs no CheckVar after it.
+	bool status_from_result = false;
 
 protected:
 	static void _bind_methods();
@@ -49,6 +53,9 @@ public:
 
 	void set_result_var(const StringName &p_result_var);
 	StringName get_result_var() const { return result_var; }
+
+	void set_status_from_result(bool p_status_from_result);
+	bool is_status_from_result() const { return status_from_result; }
 
 	virtual PackedStringArray get_configuration_warnings() override;
 

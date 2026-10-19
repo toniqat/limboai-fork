@@ -54,6 +54,11 @@ void BTCallMethod::set_result_var(const StringName &p_result_var) {
 	emit_changed();
 }
 
+void BTCallMethod::set_status_from_result(bool p_status_from_result) {
+	status_from_result = p_status_from_result;
+	emit_changed();
+}
+
 //**** Task Implementation
 
 PackedStringArray BTCallMethod::get_configuration_warnings() {
@@ -79,7 +84,8 @@ String BTCallMethod::_generate_name() {
 		}
 		args_str += vformat("%s", args).trim_prefix("[").trim_suffix("]");
 	}
-	return vformat("CallMethod %s(%s)  node: %s  %s",
+	return vformat("%s %s(%s)  node: %s  %s",
+			status_from_result ? "CallMethod?" : "CallMethod",
 			method != StringName() ? method : "???",
 			args_str,
 			node_param.is_valid() && !node_param->to_string().is_empty() ? node_param->to_string() : "???",
@@ -134,6 +140,13 @@ BT::Status BTCallMethod::_tick(double p_delta) {
 		get_blackboard()->set_var(result_var, result);
 	}
 
+	if (status_from_result) {
+		// Only a bool answers. Anything else, null included, is a method that was not written
+		// to be asked (or a call that failed, which the GDExtension build cannot tell apart),
+		// and passing it as a yes would hide that.
+		ERR_FAIL_COND_V_MSG(result.get_type() != Variant::BOOL, FAILURE, vformat("BTCallMethod: `%s` returned %s, not a bool. Returning FAILURE.", method, Variant::get_type_name(result.get_type())));
+		return bool(result) ? SUCCESS : FAILURE;
+	}
 	return SUCCESS;
 }
 
@@ -150,10 +163,13 @@ void BTCallMethod::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_delta_included"), &BTCallMethod::is_delta_included);
 	ClassDB::bind_method(D_METHOD("set_result_var", "variable"), &BTCallMethod::set_result_var);
 	ClassDB::bind_method(D_METHOD("get_result_var"), &BTCallMethod::get_result_var);
+	ClassDB::bind_method(D_METHOD("set_status_from_result", "enable"), &BTCallMethod::set_status_from_result);
+	ClassDB::bind_method(D_METHOD("is_status_from_result"), &BTCallMethod::is_status_from_result);
 
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "node", PROPERTY_HINT_RESOURCE_TYPE, "BBNode"), "set_node_param", "get_node_param");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "method"), "set_method", "get_method");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "result_var"), "set_result_var", "get_result_var");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "status_from_result"), "set_status_from_result", "is_status_from_result");
 	ADD_GROUP("Arguments", "args_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "args_include_delta"), "set_include_delta", "is_delta_included");
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "args", PROPERTY_HINT_ARRAY_TYPE, RESOURCE_TYPE_HINT("BBVariant")), "set_args", "get_args");

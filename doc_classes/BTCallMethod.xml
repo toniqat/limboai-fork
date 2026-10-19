@@ -6,6 +6,7 @@
 	<description>
 		BTCallMethod action calls a [member method] on the specified [Node] or [Object] instance and returns [code]SUCCESS[/code].
 		Returns [code]FAILURE[/code] if the action encounters an issue during the method execution.
+		With [member status_from_result] the method's [bool] result becomes the status instead: [code]true[/code] returns [code]SUCCESS[/code], [code]false[/code] returns [code]FAILURE[/code].
 	</description>
 	<tutorials>
 	</tutorials>
@@ -24,6 +25,9 @@
 		</member>
 		<member name="result_var" type="StringName" setter="set_result_var" getter="get_result_var" default="&amp;&quot;&quot;">
 			if non-empty, assign the result of the method call to the blackboard variable specified by this property.
+		</member>
+		<member name="status_from_result" type="bool" setter="set_status_from_result" getter="is_status_from_result" default="false">
+			If [code]true[/code], the method is asked a question: a [bool] result decides the status ([code]true[/code] returns [code]SUCCESS[/code], [code]false[/code] returns [code]FAILURE[/code]). Any other result, [code]null[/code] included, returns [code]FAILURE[/code] with an error, because the GDExtension build cannot tell a failed call from a method that returned nothing. If [code]false[/code], the task always returns [code]SUCCESS[/code] after the call.
 		</member>
 	</members>
 </class>
