@@ -96,6 +96,7 @@ private:
 	void _change_var_type(Variant::Type p_new_type, int p_index);
 	void _change_var_hint(PropertyHint p_new_hint, int p_index);
 	void _change_var_hint_string(const String &p_new_hint_string, int p_index);
+	void _change_var_description(const String &p_new_description, int p_index);
 
 	void _show_button_popup(Button *p_button, PopupMenu *p_popup, int p_index);
 	void _type_chosen(int id);
@@ -135,12 +136,37 @@ public:
 
 // *****
 
+// Transparent hover area over a plan variable's label in the inspector. Its tooltip (type
+// icon, name, description) replaces the inspector's help bit, which is fixed at 640 px wide.
+// Mouse events pass through to the property, so selecting, reverting and the context menu
+// still work. Tooltip text: "<type>\x1f<name>\x1f<description>".
+class BBVarTooltipArea : public Control {
+	GDCLASS(BBVarTooltipArea, Control);
+
+protected:
+	static void _bind_methods() {}
+
+public:
+	static const char *SEPARATOR;
+
+#ifdef LIMBOAI_MODULE
+	virtual Control *make_custom_tooltip(const String &p_text) const override;
+#elif LIMBOAI_GDEXTENSION
+	virtual Object *_make_custom_tooltip(const String &p_for_text) const override;
+#endif
+};
+
+// *****
+
 class EditorInspectorPluginBBPlan : public EditorInspectorPlugin {
 	GDCLASS(EditorInspectorPluginBBPlan, EditorInspectorPlugin);
 
 private:
 	BlackboardPlanEditor *plan_editor;
 	Ref<StyleBoxFlat> toolbar_style;
+	// Set while parse_property asks the inspector for the default editor: that call runs every
+	// inspector plugin's parse_property again, this one included.
+	bool instantiating_default = false;
 
 	void _edit_plan(const Ref<BlackboardPlan> &p_plan);
 	void _open_base_plan(const Ref<BlackboardPlan> &p_plan);
@@ -152,9 +178,11 @@ public:
 #ifdef LIMBOAI_MODULE
 	virtual bool can_handle(Object *p_object) override;
 	virtual void parse_begin(Object *p_object) override;
+	virtual bool parse_property(Object *p_object, const Variant::Type p_type, const String &p_path, const PropertyHint p_hint, const String &p_hint_text, const BitField<PropertyUsageFlags> p_usage, const bool p_wide = false) override;
 #elif LIMBOAI_GDEXTENSION
 	virtual bool _can_handle(Object *p_object) const override;
 	virtual void _parse_begin(Object *p_object) override;
+	virtual bool _parse_property(Object *p_object, Variant::Type p_type, const String &p_name, PropertyHint p_hint_type, const String &p_hint_string, BitField<PropertyUsageFlags> p_usage_flags, bool p_wide) override;
 #endif
 
 	EditorInspectorPluginBBPlan();

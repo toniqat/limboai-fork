@@ -13,6 +13,8 @@
 
 #include "blackboard_plan_editor.h"
 
+#include "bb_var_bind_buttons.h"
+#include "editor_tooltip.h"
 #include "../compat/editor_scale.h"
 #include "../compat/translation.h"
 #include "../util/limbo_string_names.h"
@@ -23,11 +25,15 @@
 #include "scene/gui/label.h"
 #include "scene/gui/margin_container.h"
 #include "scene/gui/separator.h"
+#include "scene/gui/texture_rect.h"
 #endif // LIMBOAI_MODULE
 
 #ifdef LIMBOAI_GDEXTENSION
+#include <godot_cpp/classes/editor_inspector.hpp>
 #include <godot_cpp/classes/editor_interface.hpp>
+#include <godot_cpp/classes/editor_property.hpp>
 #include <godot_cpp/classes/h_box_container.hpp>
+#include <godot_cpp/classes/texture_rect.hpp>
 #include <godot_cpp/classes/h_separator.hpp>
 #include <godot_cpp/classes/input.hpp>
 #include <godot_cpp/classes/input_event_mouse_motion.hpp>
@@ -160,6 +166,12 @@ void BlackboardPlanEditor::_change_var_hint(PropertyHint p_new_hint, int p_index
 void BlackboardPlanEditor::_change_var_hint_string(const String &p_new_hint_string, int p_index) {
 	ERR_FAIL_COND(plan.is_null());
 	plan->get_var_by_index(p_index).second.set_hint_string(p_new_hint_string);
+	plan->notify_property_list_changed();
+}
+
+void BlackboardPlanEditor::_change_var_description(const String &p_new_description, int p_index) {
+	ERR_FAIL_COND(plan.is_null());
+	plan->get_var_by_index(p_index).second.set_description(p_new_description);
 	plan->notify_property_list_changed();
 }
 
@@ -424,13 +436,24 @@ void BlackboardPlanEditor::_refresh() {
 
 		LineEdit *hint_string_edit = memnew(LineEdit);
 		props_hbox->add_child(hint_string_edit);
-		hint_string_edit->set_custom_minimum_size(Size2(300.0, 0.0) * EDSCALE);
+		hint_string_edit->set_custom_minimum_size(Size2(200.0, 0.0) * EDSCALE);
 		hint_string_edit->set_text(var.get_hint_string());
 		hint_string_edit->set_placeholder(TTR("Hint string"));
-		hint_string_edit->set_h_size_flags(Control::SIZE_EXPAND_FILL);
 		hint_string_edit->set_flat(true);
 		hint_string_edit->connect(LW_NAME(text_changed), callable_mp(this, &BlackboardPlanEditor::_change_var_hint_string).bind(i));
 		hint_string_edit->connect(LW_NAME(text_submitted), callable_mp(this, &BlackboardPlanEditor::_refresh).unbind(1));
+
+		// Comment shown in the inspector tooltip of the variable.
+		LineEdit *description_edit = memnew(LineEdit);
+		props_hbox->add_child(description_edit);
+		description_edit->set_custom_minimum_size(Size2(300.0, 0.0) * EDSCALE);
+		description_edit->set_text(var.get_description());
+		description_edit->set_tooltip_text(var.get_description());
+		description_edit->set_placeholder(TTR("Description"));
+		description_edit->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+		description_edit->set_flat(true);
+		description_edit->connect(LW_NAME(text_changed), callable_mp(this, &BlackboardPlanEditor::_change_var_description).bind(i));
+		description_edit->connect(LW_NAME(text_submitted), callable_mp(this, &BlackboardPlanEditor::_refresh).unbind(1));
 
 		Button *drag_button = memnew(Button);
 		props_hbox->add_child(drag_button);
@@ -580,9 +603,15 @@ BlackboardPlanEditor::BlackboardPlanEditor() {
 		Label *hint_string_header = memnew(Label);
 		labels_hbox->add_child(hint_string_header);
 		hint_string_header->set_text(TTR("Hint string"));
-		hint_string_header->set_custom_minimum_size(Size2(300.0, 0.0) * EDSCALE);
-		hint_string_header->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+		hint_string_header->set_custom_minimum_size(Size2(200.0, 0.0) * EDSCALE);
 		hint_string_header->set_theme_type_variation(LW_NAME(HeaderSmall));
+
+		Label *description_header = memnew(Label);
+		labels_hbox->add_child(description_header);
+		description_header->set_text(TTR("Description"));
+		description_header->set_custom_minimum_size(Size2(300.0, 0.0) * EDSCALE);
+		description_header->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+		description_header->set_theme_type_variation(LW_NAME(HeaderSmall));
 	}
 
 	scroll_container = memnew(ScrollContainer);
@@ -607,6 +636,35 @@ BlackboardPlanEditor::BlackboardPlanEditor() {
 	theme_cache.even_style.instantiate();
 	theme_cache.header_style.instantiate();
 }
+
+// ***** BBVarTooltipArea *****
+
+const char *BBVarTooltipArea::SEPARATOR = "\x1f";
+
+namespace {
+
+Control *_make_var_tooltip(const String &p_text) {
+	if (!p_text.contains(BBVarTooltipArea::SEPARATOR)) {
+		return nullptr;
+	}
+	Variant::Type type = Variant::Type(p_text.get_slice(BBVarTooltipArea::SEPARATOR, 0).to_int());
+	String name = p_text.get_slice(BBVarTooltipArea::SEPARATOR, 1);
+	String description = p_text.get_slice(BBVarTooltipArea::SEPARATOR, 2);
+	Ref<Texture2D> icon = EditorInterface::get_singleton()->get_editor_theme()->get_icon(Variant::get_type_name(type), LW_NAME(EditorIcons));
+	return limbo_make_tooltip(icon, name, "HeaderSmall", description);
+}
+
+} // namespace
+
+#ifdef LIMBOAI_MODULE
+Control *BBVarTooltipArea::make_custom_tooltip(const String &p_text) const {
+	return _make_var_tooltip(p_text);
+}
+#elif LIMBOAI_GDEXTENSION
+Object *BBVarTooltipArea::_make_custom_tooltip(const String &p_for_text) const {
+	return _make_var_tooltip(p_for_text);
+}
+#endif
 
 // ***** EditorInspectorPluginBBPlan *****
 
@@ -674,6 +732,65 @@ void EditorInspectorPluginBBPlan::_parse_begin(Object *p_object) {
 	}
 
 	add_custom_control(panel);
+}
+
+// The inspector lists each plan variable as a property named after it. The default editor is
+// built here instead, with a type icon in front of the label and a BBVarTooltipArea over the
+// rest of the label, both in the property's left inline container, and the binding controls
+// (BBVarBindButtons) in its right inline container. Godot 4.6+ gives EditorProperty these two
+// HBoxContainers as its first two children (left: laid out over the label area, its width
+// shifts the label text; right: at the right end of the row); a missing one leaves that side
+// unchanged.
+#ifdef LIMBOAI_MODULE
+bool EditorInspectorPluginBBPlan::parse_property(Object *p_object, const Variant::Type p_type, const String &p_path, const PropertyHint p_hint, const String &p_hint_text, const BitField<PropertyUsageFlags> p_usage, const bool p_wide) {
+	const String &p_name = p_path;
+	const PropertyHint p_hint_type = p_hint;
+	const String &p_hint_string = p_hint_text;
+	const BitField<PropertyUsageFlags> p_usage_flags = p_usage;
+#elif LIMBOAI_GDEXTENSION
+bool EditorInspectorPluginBBPlan::_parse_property(Object *p_object, Variant::Type p_type, const String &p_name, PropertyHint p_hint_type, const String &p_hint_string, BitField<PropertyUsageFlags> p_usage_flags, bool p_wide) {
+#endif
+	Ref<BlackboardPlan> plan = Object::cast_to<BlackboardPlan>(p_object);
+	if (instantiating_default || plan.is_null() || p_name.contains("/") || !plan->has_var(p_name)) {
+		return false;
+	}
+	// instantiate_property_editor() offers the property to every inspector plugin, this one
+	// included; without the guard it recursed until the stack overflowed (editor crash on any
+	// plan with variables shown in the inspector).
+	instantiating_default = true;
+	EditorProperty *editor = EditorInspector::instantiate_property_editor(p_object, p_type, p_name, p_hint_type, p_hint_string, (uint32_t)p_usage_flags, p_wide);
+	instantiating_default = false;
+	if (editor == nullptr) {
+		return false;
+	}
+	HBoxContainer *left = editor->get_child_count() > 0 ? Object::cast_to<HBoxContainer>(editor->get_child(0)) : nullptr;
+	if (left != nullptr) {
+		BBVariable var = plan->get_var(p_name);
+		String tooltip = itos(var.get_type()) + BBVarTooltipArea::SEPARATOR + p_name + BBVarTooltipArea::SEPARATOR + var.get_description();
+
+		TextureRect *icon = memnew(TextureRect);
+		icon->set_texture(EditorInterface::get_singleton()->get_editor_theme()->get_icon(Variant::get_type_name(var.get_type()), LW_NAME(EditorIcons)));
+		icon->set_custom_minimum_size(Size2(20, 16) * EDSCALE);
+		icon->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
+		icon->set_stretch_mode(TextureRect::STRETCH_KEEP_CENTERED);
+		icon->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+		left->add_child(icon);
+
+		BBVarTooltipArea *area = memnew(BBVarTooltipArea);
+		area->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+		area->set_v_size_flags(Control::SIZE_FILL);
+		area->set_mouse_filter(Control::MOUSE_FILTER_PASS);
+		area->set_tooltip_text(tooltip);
+		left->add_child(area);
+	}
+	HBoxContainer *right = editor->get_child_count() > 1 ? Object::cast_to<HBoxContainer>(editor->get_child(1)) : nullptr;
+	if (right != nullptr) {
+		BBVarBindButtons *bind = memnew(BBVarBindButtons);
+		bind->setup(plan, p_name, editor);
+		right->add_child(bind);
+	}
+	add_property_editor(p_name, editor);
+	return true;
 }
 
 EditorInspectorPluginBBPlan::EditorInspectorPluginBBPlan() {

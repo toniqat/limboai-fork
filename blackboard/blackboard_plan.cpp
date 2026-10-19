@@ -104,6 +104,8 @@ bool BlackboardPlan::_set(const StringName &p_name, const Variant &p_value) {
 			var_map[var_name].set_hint((PropertyHint)(int)p_value);
 		} else if (what == "hint_string") {
 			var_map[var_name].set_hint_string(p_value);
+		} else if (what == "description") {
+			var_map[var_name].set_description(p_value);
 		} else if (what == "property_binding") {
 			property_bindings[var_name] = NodePath(p_value);
 		} else {
@@ -194,6 +196,8 @@ bool BlackboardPlan::_get(const StringName &p_name, Variant &r_ret) const {
 		r_ret = var_map[var_name].get_hint();
 	} else if (what == "hint_string") {
 		r_ret = var_map[var_name].get_hint_string();
+	} else if (what == "description") {
+		r_ret = var_map[var_name].get_description();
 	}
 	return true;
 }
@@ -225,6 +229,10 @@ void BlackboardPlan::_get_property_list(List<PropertyInfo> *p_list) const {
 		p_list->push_back(PropertyInfo(var.get_type(), "var/" + var_name + "/value", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL));
 		p_list->push_back(PropertyInfo(Variant::INT, "var/" + var_name + "/hint", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL));
 		p_list->push_back(PropertyInfo(Variant::STRING, "var/" + var_name + "/hint_string", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL));
+		// Written only when set, so plans without comments keep their file format.
+		if (!var.get_description().is_empty()) {
+			p_list->push_back(PropertyInfo(Variant::STRING, "var/" + var_name + "/description", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL));
+		}
 	}
 
 	// * Mapping
@@ -245,18 +253,14 @@ void BlackboardPlan::_get_property_list(List<PropertyInfo> *p_list) const {
 	}
 
 	// * Binding
-	p_list->push_back(PropertyInfo(Variant::NIL, "Binding", PROPERTY_HINT_NONE, "binding/", PROPERTY_USAGE_GROUP));
+	// Storage only: the inspector edits a binding with the chain button and the dots menu at
+	// the right end of the variable's row (editor/bb_var_bind_buttons.h), not in a group.
 	for (const Pair<StringName, BBVariable> &p : var_list) {
-		if (_is_var_nil(p.second) || _is_var_private(p.first, p.second)) {
+		if (_is_var_nil(p.second) || _is_var_private(p.first, p.second) || has_mapping(p.first)) {
 			continue;
 		}
-		if (unlikely(has_mapping(p.first))) {
-			p_list->push_back(PropertyInfo(Variant::STRING, "binding/" + p.first, PROPERTY_HINT_NONE, "", PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY));
-		} else {
-			PropertyUsageFlags usage = has_property_binding(p.first) ? PROPERTY_USAGE_DEFAULT : PROPERTY_USAGE_EDITOR;
-			// PROPERTY_HINT_LINK is used to signal that NodePath should point to a property.
-			// Our inspector plugin will know how to handle it.
-			p_list->push_back(PropertyInfo(Variant::NODE_PATH, "binding/" + p.first, PROPERTY_HINT_LINK, itos(p.second.get_type()), usage));
+		if (has_property_binding(p.first)) {
+			p_list->push_back(PropertyInfo(Variant::NODE_PATH, "binding/" + p.first, PROPERTY_HINT_LINK, itos(p.second.get_type()), PROPERTY_USAGE_STORAGE));
 		}
 	}
 }

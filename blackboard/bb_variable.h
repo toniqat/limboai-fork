@@ -34,6 +34,8 @@ private:
 		Variant::Type type = Variant::NIL;
 		PropertyHint hint = PropertyHint::PROPERTY_HINT_NONE;
 		String hint_string;
+		// Editor-facing comment of the variable (plan editor, inspector tooltip). No runtime use.
+		String description;
 
 		NodePath binding_path;
 		uint64_t bound_object = 0;
@@ -55,6 +57,9 @@ public:
 
 	void set_hint_string(const String &p_hint_string);
 	String get_hint_string() const;
+
+	void set_description(const String &p_description);
+	String get_description() const;
 
 	BBVariable duplicate(bool p_deep = false) const;
 

@@ -79,10 +79,19 @@ String BBVariable::get_hint_string() const {
 	return data->hint_string;
 }
 
+void BBVariable::set_description(const String &p_description) {
+	data->description = p_description;
+}
+
+String BBVariable::get_description() const {
+	return data->description;
+}
+
 BBVariable BBVariable::duplicate(bool p_deep) const {
 	BBVariable var;
 	var.data->hint = data->hint;
 	var.data->hint_string = data->hint_string;
+	var.data->description = data->description;
 	var.data->type = data->type;
 	if (p_deep) {
 		var.data->value = data->value.duplicate(p_deep);
@@ -105,6 +114,9 @@ bool BBVariable::is_same_prop_info(const BBVariable &p_other) const {
 	if (data->hint_string != p_other.data->hint_string) {
 		return false;
 	}
+	if (data->description != p_other.data->description) {
+		return false;
+	}
 	return true;
 }
 
@@ -112,6 +124,7 @@ void BBVariable::copy_prop_info(const BBVariable &p_other) {
 	data->type = p_other.data->type;
 	data->hint = p_other.data->hint;
 	data->hint_string = p_other.data->hint_string;
+	data->description = p_other.data->description;
 }
 
 void BBVariable::bind(Object *p_object, const StringName &p_property) {

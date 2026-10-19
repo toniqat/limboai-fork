@@ -96,6 +96,7 @@
 #include "bt/tasks/utility/bt_wait.h"
 #include "bt/tasks/utility/bt_wait_ticks.h"
 #include "editor/action_banner.h"
+#include "editor/bb_var_bind_buttons.h"
 #include "editor/blackboard_plan_editor.h"
 #include "editor/debugger/behavior_tree_data.h"
 #include "editor/debugger/limbo_debugger.h"
@@ -272,6 +273,8 @@ void initialize_limboai_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_INTERNAL_CLASS(LimboDebuggerTab);
 		GDREGISTER_INTERNAL_CLASS(LimboDebuggerPlugin);
 		GDREGISTER_INTERNAL_CLASS(BlackboardPlanEditor);
+		GDREGISTER_INTERNAL_CLASS(BBVarTooltipArea);
+		GDREGISTER_INTERNAL_CLASS(BBVarBindButtons);
 		GDREGISTER_INTERNAL_CLASS(EditorInspectorPluginBBPlan);
 		GDREGISTER_INTERNAL_CLASS(EditorInspectorPluginPropertyPath);
 		GDREGISTER_INTERNAL_CLASS(EditorPropertyPropertyPath);
