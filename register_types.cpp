@@ -104,6 +104,7 @@
 #include "editor/editor_property_variable_name.h"
 #include "editor/mode_switch_button.h"
 #include "editor/tree_search.h"
+#include "hsm/hsm_check_var.h"
 #include "hsm/hsm_condition.h"
 #include "hsm/hsm_resource.h"
 #include "hsm/limbo_hsm.h"
@@ -152,6 +153,7 @@ void initialize_limboai_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(LimboHSM);
 
 		GDREGISTER_CLASS(HSMCondition);
+		GDREGISTER_CLASS(HSMCheckVar);
 		GDREGISTER_CLASS(HSMTransition);
 		GDREGISTER_CLASS(HSMStateSpec);
 		GDREGISTER_CLASS(HierarchicalStateMachine);
