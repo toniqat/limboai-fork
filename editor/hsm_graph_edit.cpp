@@ -42,10 +42,10 @@ namespace {
 // and the half-angle are here.
 const float ARROW_LENGTH = 16.0;
 const float ARROW_SPREAD = 0.5;
-// Where the line stops, as a share of the head's depth measured from the tip: just past the
-// base, so the two touch without a gap. Any deeper and the line's antialiased edges are drawn
-// across the inside of the head as dark seams.
-const float ARROW_LINE_INSET = 0.92;
+// Where the line stops, as a share of the head's depth measured from the tip: inside the
+// triangle, so the head (painted over the line) covers the line's square end and its rim.
+// At this depth the head is still wider than the line.
+const float ARROW_LINE_INSET = 0.8;
 // Between the border and the tip. At zero the head is buried in the node.
 const float EDGE_GAP = 6.0;
 
@@ -151,9 +151,32 @@ bool HSMGraphEdit::_segment_hits(const Vector2 &p_a, const Vector2 &p_b, const R
 	return true;
 }
 
+// The curve an edge between these rects takes for a control point picked against their
+// centers. The ends sit where the rays from each center towards `p_ctrl` leave the rects.
+// The control point itself is then moved along the chord to its middle, keeping only how far
+// aside it stands: the midpoint of two *centers* can lie past an end -- inside a large box, or
+// behind it -- and a quadratic aimed past its own end runs on through it and doubles back
+// over its arrowhead.
+void HSMGraphEdit::_curve(const Rect2 &p_from, const Rect2 &p_to, const Vector2 &p_ctrl, Vector2 &r_p0, Vector2 &r_ctrl, Vector2 &r_p1) {
+	Vector2 from_dir = (p_ctrl - p_from.get_center()).normalized();
+	Vector2 to_dir = (p_ctrl - p_to.get_center()).normalized();
+	r_p0 = _edge_point(p_from, from_dir) + from_dir * EDGE_GAP;
+	r_p1 = _edge_point(p_to, to_dir) + to_dir * EDGE_GAP;
+	Vector2 mid = (r_p0 + r_p1) * 0.5;
+	Vector2 chord = r_p1 - r_p0;
+	if (chord.length_squared() < 1.0) {
+		r_ctrl = mid;
+		return;
+	}
+	Vector2 normal = chord.normalized().orthogonal();
+	r_ctrl = mid + normal * normal.dot(p_ctrl - mid);
+}
+
 int HSMGraphEdit::_hits(const Rect2 &p_from, const Rect2 &p_to, const Vector2 &p_ctrl, const Vector<Rect2> &p_blockers) {
-	Vector2 p0 = _edge_point(p_from, (p_ctrl - p_from.get_center()).normalized());
-	Vector2 p1 = _edge_point(p_to, (p_ctrl - p_to.get_center()).normalized());
+	Vector2 p0;
+	Vector2 ctrl;
+	Vector2 p1;
+	_curve(p_from, p_to, p_ctrl, p0, ctrl, p1);
 	int count = 0;
 	for (int i = 0; i < p_blockers.size(); i++) {
 		const Rect2 &rect = p_blockers[i];
@@ -161,7 +184,7 @@ int HSMGraphEdit::_hits(const Rect2 &p_from, const Rect2 &p_to, const Vector2 &p
 		for (int s = 1; s <= CURVE_SEGMENTS; s++) {
 			float t = float(s) / float(CURVE_SEGMENTS);
 			float u = 1.0 - t;
-			Vector2 cur = p0 * (u * u) + p_ctrl * (2.0 * u * t) + p1 * (t * t);
+			Vector2 cur = p0 * (u * u) + ctrl * (2.0 * u * t) + p1 * (t * t);
 			if (_segment_hits(prev, cur, rect)) {
 				count += 1;
 				break;
@@ -298,34 +321,47 @@ HSMGraphEdit::Route HSMGraphEdit::_route(GraphNode *p_from, GraphNode *p_to) con
 	}
 
 	// Where the line leaves is decided by where it is headed: the ray from the center
-	// towards the control point, taken to the border.
-	Vector2 from_dir = (best - from_center).normalized();
-	Vector2 to_dir = (best - to_center).normalized();
+	// towards the control point, taken to the border (see _curve()).
+	Vector2 p0;
+	Vector2 ctrl;
+	Vector2 p1;
+	_curve(from_rect, to_rect, best, p0, ctrl, p1);
+	// Each head points down the curve's own tangent at its end, which runs towards the
+	// control point, so the line arrives along the line the head points down.
+	Vector2 to_out = (ctrl - p1).normalized();
+	Vector2 from_out = (ctrl - p0).normalized();
+	if (to_out.is_zero_approx()) {
+		to_out = (p0 - p1).normalized();
+	}
+	if (from_out.is_zero_approx()) {
+		from_out = -to_out;
+	}
 	route.tip_node = p_to;
-	route.tip = _edge_point(to_rect, to_dir) + to_dir * EDGE_GAP;
-	route.tip_out = to_dir;
-	Vector2 p0 = _edge_point(from_rect, from_dir) + from_dir * EDGE_GAP;
+	route.tip = p1;
+	route.tip_out = to_out;
 	if (both) {
 		route.tail_node = p_from;
 		route.tail = p0;
-		route.tail_out = from_dir;
-		p0 = _head_base(p0, from_dir, 1.0);
+		route.tail_out = from_out;
+		p0 = _head_base(p0, from_out, 1.0);
 	}
-	// The ends sit on the rays from each center through the control point, so the curve
-	// arrives along the same line the head points down.
-	Vector2 p1 = _head_base(route.tip, to_dir, 1.0);
+	p1 = _head_base(p1, to_out, 1.0);
 	for (int s = 0; s <= CURVE_SEGMENTS; s++) {
 		float t = float(s) / float(CURVE_SEGMENTS);
 		float u = 1.0 - t;
-		route.line.push_back(p0 * (u * u) + best * (2.0 * u * t) + p1 * (t * t));
+		route.line.push_back(p0 * (u * u) + ctrl * (2.0 * u * t) + p1 * (t * t));
 	}
 	return route;
 }
 
 // Under GraphEdit's Line2D children, in their coordinates: unscaled graph space times the
-// zoom, the layer itself being shifted by the scroll. First the machines' boxes, outermost
-// first (the child order the view keeps them in), then every head.
+// zoom, the layer itself being shifted by the scroll. The machines' boxes, outermost first
+// (the child order the view keeps them in). The heads go on `heads_layer`, over the lines,
+// and are redrawn whenever this layer is: it is redrawn exactly when the lines are rebuilt.
 void HSMGraphEdit::_draw_under_lines() {
+	if (heads_layer != nullptr) {
+		heads_layer->queue_redraw();
+	}
 	float zoom = _zoom();
 	Ref<StyleBox> panel = get_theme_stylebox(StringName("panel"), StringName("GraphNode"));
 	Ref<StyleBox> panel_selected = get_theme_stylebox(StringName("panel_selected"), StringName("GraphNode"));
@@ -344,7 +380,12 @@ void HSMGraphEdit::_draw_under_lines() {
 		lines_layer->draw_style_box(box, Rect2(0.0, title, rect.size.x, rect.size.y - title));
 	}
 	lines_layer->draw_set_transform(Vector2(), 0.0, Vector2(1, 1));
+}
 
+// Over every line and under every node: `heads_layer` is the lines layer's internal child at
+// the back, drawn after GraphEdit's Line2D children, at the same origin.
+void HSMGraphEdit::_draw_heads() {
+	float zoom = _zoom();
 	Color activity_color = get_theme_color(StringName("activity"), StringName("GraphEdit"));
 	TypedArray<Dictionary> list = get_connection_list();
 	for (int i = 0; i < list.size(); i++) {
@@ -367,9 +408,9 @@ void HSMGraphEdit::_draw_under_lines() {
 		// it caps, and the pair's later connection is drawn last here as it is there.
 		Color first_color = from->get_slot_color_right(0).lerp(activity_color, lit);
 		Color last_color = to->get_slot_color_left(0).lerp(activity_color, lit);
-		_draw_head(lines_layer, _head(route.tip * zoom, route.tip_out, zoom), last_color);
+		_draw_head(heads_layer, _head(route.tip * zoom, route.tip_out, zoom), last_color);
 		if (route.tail_node != nullptr) {
-			_draw_head(lines_layer, _head(route.tail * zoom, route.tail_out, zoom), first_color);
+			_draw_head(heads_layer, _head(route.tail * zoom, route.tail_out, zoom), first_color);
 		}
 	}
 }
@@ -727,6 +768,11 @@ HSMGraphEdit::HSMGraphEdit() {
 	lines_layer = Object::cast_to<Control>(get_node_or_null(NodePath("_connection_layer")));
 	if (lines_layer != nullptr) {
 		lines_layer->connect("draw", callable_mp(this, &HSMGraphEdit::_draw_under_lines));
+		// Internal and at the back, so it is drawn after every Line2D GraphEdit adds later.
+		heads_layer = memnew(Control);
+		heads_layer->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+		lines_layer->add_child(heads_layer, false, Node::INTERNAL_MODE_BACK);
+		heads_layer->connect("draw", callable_mp(this, &HSMGraphEdit::_draw_heads));
 		connect("node_selected", callable_mp(this, &HSMGraphEdit::_on_node_selection_changed));
 		connect("node_deselected", callable_mp(this, &HSMGraphEdit::_on_node_selection_changed));
 	}
