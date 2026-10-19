@@ -14,6 +14,7 @@
 #include "../compat/resource.h"
 
 #ifdef LIMBOAI_MODULE
+#include "core/config/engine.h"
 #include "core/object/class_db.h"
 #include "core/object/script_language.h"
 #include "core/templates/hash_map.h"
@@ -21,6 +22,7 @@
 #endif // LIMBOAI_MODULE
 
 #ifdef LIMBOAI_GDEXTENSION
+#include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/script.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/templates/hash_map.hpp>
@@ -57,6 +59,16 @@ void HSMTransition::set_note(const String &p_note) {
 	emit_changed();
 }
 
+void HSMTransition::set_condition(const Ref<HSMCondition> &p_condition) {
+	condition = p_condition;
+	emit_changed();
+}
+
+void HSMTransition::set_priority(int p_priority) {
+	priority = p_priority;
+	emit_changed();
+}
+
 void HSMTransition::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_from", "state"), &HSMTransition::set_from);
 	ClassDB::bind_method(D_METHOD("get_from"), &HSMTransition::get_from);
@@ -66,10 +78,19 @@ void HSMTransition::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_event"), &HSMTransition::get_event);
 	ClassDB::bind_method(D_METHOD("set_note", "note"), &HSMTransition::set_note);
 	ClassDB::bind_method(D_METHOD("get_note"), &HSMTransition::get_note);
+	ClassDB::bind_method(D_METHOD("set_condition", "condition"), &HSMTransition::set_condition);
+	ClassDB::bind_method(D_METHOD("get_condition"), &HSMTransition::get_condition);
+	ClassDB::bind_method(D_METHOD("set_priority", "priority"), &HSMTransition::set_priority);
+	ClassDB::bind_method(D_METHOD("get_priority"), &HSMTransition::get_priority);
+	ClassDB::bind_method(D_METHOD("is_polled"), &HSMTransition::is_polled);
 
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "from", PROPERTY_HINT_RESOURCE_TYPE, "HSMStateSpec"), "set_from", "get_from");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "to", PROPERTY_HINT_RESOURCE_TYPE, "HSMStateSpec"), "set_to", "get_to");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "event"), "set_event", "get_event");
+	// Before `note` so the Inspector reads in the order the row is decided: where to, on what
+	// signal, under which condition, how urgently. The note explains, it does not decide.
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "condition", PROPERTY_HINT_RESOURCE_TYPE, "HSMCondition"), "set_condition", "get_condition");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "priority"), "set_priority", "get_priority");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "note", PROPERTY_HINT_MULTILINE_TEXT), "set_note", "get_note");
 }
 
@@ -89,6 +110,144 @@ void HSMStateSpec::set_state_name(const StringName &p_name) {
 void HSMStateSpec::set_state_script(const Ref<Script> &p_script) {
 	state_script = p_script;
 	emit_changed();
+	// The `state_props/` entries the Inspector shows are the script's exports, so they change
+	// with it.
+	notify_property_list_changed();
+}
+
+void HSMStateSpec::set_state_properties(const Dictionary &p_properties) {
+	state_properties = p_properties;
+	emit_changed();
+}
+
+namespace {
+
+const char *STATE_PROPS_PREFIX = "state_props/";
+
+// The script's exported properties: the ones a person can set in an Inspector and that a
+// file would store. Groups and categories are layout, not properties, and are left out.
+Vector<PropertyInfo> _script_exports(const Ref<Script> &p_script) {
+	Vector<PropertyInfo> out;
+	if (p_script.is_null()) {
+		return out;
+	}
+#ifdef LIMBOAI_MODULE
+	List<PropertyInfo> props;
+	p_script->get_script_property_list(&props);
+	for (const PropertyInfo &prop : props) {
+#elif LIMBOAI_GDEXTENSION
+	TypedArray<Dictionary> props = p_script->get_script_property_list();
+	for (int i = 0; i < props.size(); i++) {
+		PropertyInfo prop = PropertyInfo::from_dict(props[i]);
+#endif
+		if (prop.usage & (PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP)) {
+			continue;
+		}
+		if (!(prop.usage & PROPERTY_USAGE_STORAGE) || !(prop.usage & PROPERTY_USAGE_EDITOR)) {
+			continue;
+		}
+		out.push_back(prop);
+	}
+	return out;
+}
+
+Variant _script_default(const Ref<Script> &p_script, const StringName &p_name) {
+	if (p_script.is_null()) {
+		return Variant();
+	}
+#ifdef LIMBOAI_MODULE
+	Variant ret;
+	p_script->get_property_default_value(p_name, ret);
+	return ret;
+#elif LIMBOAI_GDEXTENSION
+	return p_script->get_property_default_value(p_name);
+#endif
+}
+
+// "state_props/max_suspend" -> "max_suspend", or empty when the name is not one of ours.
+String _state_prop_name(const StringName &p_name) {
+	String name = p_name;
+	if (!name.begins_with(STATE_PROPS_PREFIX)) {
+		return String();
+	}
+	return name.substr(String(STATE_PROPS_PREFIX).length());
+}
+
+bool _has_export(const Ref<Script> &p_script, const String &p_name) {
+	Vector<PropertyInfo> exports = _script_exports(p_script);
+	for (int i = 0; i < exports.size(); i++) {
+		if (String(exports[i].name) == p_name) {
+			return true;
+		}
+	}
+	return false;
+}
+
+} // namespace
+
+bool HSMStateSpec::_set(const StringName &p_name, const Variant &p_value) {
+	String prop = _state_prop_name(p_name);
+	if (prop.is_empty() || state_script.is_null()) {
+		return false;
+	}
+	// Equal to the script default means "not overridden": the key goes, which is also what
+	// the Inspector's revert arrow amounts to. A file then only holds the values that differ.
+	Dictionary props = state_properties.duplicate();
+	// Keys are written as String. A hand-written StringName key for the same property is
+	// dropped so the dictionary never holds two values for one property.
+	props.erase(StringName(prop));
+	if (p_value == _script_default(state_script, prop)) {
+		props.erase(prop);
+	} else {
+		props[prop] = p_value;
+	}
+	set_state_properties(props);
+	return true;
+}
+
+bool HSMStateSpec::_get(const StringName &p_name, Variant &r_ret) const {
+	String prop = _state_prop_name(p_name);
+	if (prop.is_empty() || state_script.is_null()) {
+		return false;
+	}
+	if (state_properties.has(prop)) {
+		r_ret = state_properties[prop];
+	} else if (state_properties.has(StringName(prop))) {
+		r_ret = state_properties[StringName(prop)];
+	} else {
+		r_ret = _script_default(state_script, prop);
+	}
+	return true;
+}
+
+void HSMStateSpec::_get_property_list(List<PropertyInfo> *p_list) const {
+	// Only for the Inspector. At runtime nothing reads these, and listing a script's exports
+	// is not free.
+	if (state_script.is_null() || !Engine::get_singleton()->is_editor_hint()) {
+		return;
+	}
+	Vector<PropertyInfo> exports = _script_exports(state_script);
+	for (int i = 0; i < exports.size(); i++) {
+		PropertyInfo prop = exports[i];
+		prop.name = String(STATE_PROPS_PREFIX) + String(prop.name);
+		// Shown and edited, never stored on its own: `state_properties` is the stored form.
+		prop.usage = PROPERTY_USAGE_EDITOR;
+		p_list->push_back(prop);
+	}
+}
+
+bool HSMStateSpec::_property_can_revert(const StringName &p_name) const {
+	String prop = _state_prop_name(p_name);
+	return !prop.is_empty() && state_script.is_valid() && (state_properties.has(prop) || state_properties.has(StringName(prop)));
+}
+
+bool HSMStateSpec::_property_get_revert(const StringName &p_name, Variant &r_property) const {
+	String prop = _state_prop_name(p_name);
+	if (prop.is_empty() || state_script.is_null() || !_has_export(state_script, prop)) {
+		return false;
+	}
+	r_property = _script_default(state_script, prop);
+	return true;
 }
 
 void HSMStateSpec::set_behavior_tree(const Ref<BehaviorTree> &p_tree) {
@@ -165,6 +324,8 @@ void HSMStateSpec::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_state_name"), &HSMStateSpec::get_state_name);
 	ClassDB::bind_method(D_METHOD("set_state_script", "script"), &HSMStateSpec::set_state_script);
 	ClassDB::bind_method(D_METHOD("get_state_script"), &HSMStateSpec::get_state_script);
+	ClassDB::bind_method(D_METHOD("set_state_properties", "properties"), &HSMStateSpec::set_state_properties);
+	ClassDB::bind_method(D_METHOD("get_state_properties"), &HSMStateSpec::get_state_properties);
 	ClassDB::bind_method(D_METHOD("set_behavior_tree", "behavior_tree"), &HSMStateSpec::set_behavior_tree);
 	ClassDB::bind_method(D_METHOD("get_behavior_tree"), &HSMStateSpec::get_behavior_tree);
 	ClassDB::bind_method(D_METHOD("set_children", "children"), &HSMStateSpec::set_children);
@@ -189,6 +350,7 @@ void HSMStateSpec::_bind_methods() {
 
 	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "state_name"), "set_state_name", "get_state_name");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "state_script", PROPERTY_HINT_RESOURCE_TYPE, "Script"), "set_state_script", "get_state_script");
+	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "state_properties"), "set_state_properties", "get_state_properties");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "behavior_tree", PROPERTY_HINT_RESOURCE_TYPE, "BehaviorTree"), "set_behavior_tree", "get_behavior_tree");
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "children", PROPERTY_HINT_ARRAY_TYPE, RESOURCE_TYPE_HINT("HSMStateSpec")), "set_children", "get_children");
 	// Read through the declared value, not get_initial_child(): the fall back to the first
@@ -242,6 +404,8 @@ Ref<HSMStateSpec> _copy_values(const Ref<HSMStateSpec> &p_src) {
 	out.instantiate();
 	out->set_state_name(p_src->get_state_name());
 	out->set_state_script(p_src->get_state_script());
+	// A copy, so that overlaying a child file's values never writes into the base file.
+	out->set_state_properties(p_src->get_state_properties().duplicate());
 	out->set_behavior_tree(p_src->get_behavior_tree());
 	out->set_graph_position(p_src->get_graph_position());
 	out->set_graph_size(p_src->get_graph_size());
@@ -294,6 +458,16 @@ void _overlay(const Ref<HSMStateSpec> &p_dst, const Ref<HSMStateSpec> &p_src,
 	}
 	if (p_src->get_behavior_tree().is_valid()) {
 		p_dst->set_behavior_tree(p_src->get_behavior_tree());
+	}
+	// Per key: the child names only the values it changes, and the rest stay the base's.
+	if (!p_src->get_state_properties().is_empty()) {
+		Dictionary merged_props = p_dst->get_state_properties().duplicate();
+		Dictionary src_props = p_src->get_state_properties();
+		Array keys = src_props.keys();
+		for (int i = 0; i < keys.size(); i++) {
+			merged_props[keys[i]] = src_props[keys[i]];
+		}
+		p_dst->set_state_properties(merged_props);
 	}
 	if (p_src->get_graph_position() != Vector2()) {
 		p_dst->set_graph_position(p_src->get_graph_position());
@@ -405,6 +579,11 @@ Ref<HSMStateSpec> HierarchicalStateMachine::get_effective_root() const {
 			copy->set_to(*to);
 			copy->set_event(row->get_event());
 			copy->set_note(row->get_note());
+			// The condition by reference, not a copy: the merged tree is a picture of the
+			// files, and LimboHSM duplicates every condition it builds from anyway. Sharing
+			// it also keeps the editor able to match a merged row back to the authored one.
+			copy->set_condition(row->get_condition());
+			copy->set_priority(row->get_priority());
 			out.append(copy);
 		}
 		pair.merged->set_transitions(out);

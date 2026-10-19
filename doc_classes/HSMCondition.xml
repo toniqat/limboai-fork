@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="HSMCondition" inherits="Resource" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Scriptable condition of an [HSMTransition].
+	</brief_description>
+	<description>
+		A resource that decides whether a state machine transition is taken. Extend it in a script and implement [method _check]. It is saved inside the [HierarchicalStateMachine] file, on the [member HSMTransition.condition] of a row.
+		On a polled transition (empty event), the condition is asked on every update while the origin state is active. On an event transition, it acts as an extra guard asked when the event arrives.
+		A [HierarchicalStateMachine] resource is usually shared by many machines. A [LimboHSM] that builds from it duplicates each condition and binds the copy to itself, so [member blackboard], [member agent] and [member machine] belong to that machine and any state the script keeps between checks is per machine. The condition stored in the resource is never bound or modified at runtime.
+		[codeblock]
+		@tool
+		extends HSMCondition
+
+		@export var variable: StringName = &amp;"in_combat"
+
+		func _generate_name() -&gt; String:
+		    return "Var %s" % variable
+
+		func _check() -&gt; bool:
+		    return blackboard.get_var(variable, false)
+		[/codeblock]
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="_check" qualifiers="virtual const">
+			<return type="bool" />
+			<description>
+				Returns whether the transition may be taken. Should be free of side effects: it may be called on every update. A condition that does not implement it never passes.
+			</description>
+		</method>
+		<method name="_generate_name" qualifiers="virtual const">
+			<return type="String" />
+			<description>
+				Returns the name shown by the editor for this condition. The script must be a [code]@tool[/code] script for the editor to call it. See [method get_display_name].
+			</description>
+		</method>
+		<method name="_setup" qualifiers="virtual">
+			<return type="void" />
+			<description>
+				Called once, after the condition is bound to a machine. [member blackboard], [member agent] and [member machine] are available here.
+			</description>
+		</method>
+		<method name="check">
+			<return type="bool" />
+			<description>
+				Evaluates the condition by calling [method _check].
+			</description>
+		</method>
+		<method name="get_display_name">
+			<return type="String" />
+			<description>
+				Returns the display name: the result of [method _generate_name] for a tool script that implements it, otherwise the script file name in PascalCase ([code]in_combat.gd[/code] becomes [code]InCombat[/code]), otherwise [code]HSMCondition[/code].
+			</description>
+		</method>
+		<method name="is_bound" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] once the condition has been bound to a machine.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="agent" type="Node" setter="" getter="get_agent">
+			The agent the owning [LimboHSM] was initialized with. [code]null[/code] until bound.
+		</member>
+		<member name="blackboard" type="Blackboard" setter="" getter="get_blackboard">
+			The [Blackboard] of the [LimboHSM] that owns the transition. [code]null[/code] until bound.
+		</member>
+		<member name="machine" type="LimboHSM" setter="" getter="get_machine">
+			The [LimboHSM] that owns and evaluates the transition. [code]null[/code] until bound.
+		</member>
+	</members>
+</class>

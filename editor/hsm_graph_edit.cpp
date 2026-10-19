@@ -450,6 +450,16 @@ bool HSMGraphEdit::_pick_connection_at(const Vector2 &p_position) {
 	return true;
 }
 
+void HSMGraphEdit::pick_connection(const StringName &p_from, const StringName &p_to) {
+	_clear_pick();
+	if (!is_node_connected(p_from, 0, p_to, 0) && !is_node_connected(p_to, 0, p_from, 0)) {
+		return;
+	}
+	picked_from = p_from;
+	picked_to = p_to;
+	_mark_pick(1.0);
+}
+
 void HSMGraphEdit::_stop_connecting() {
 	connecting = false;
 	connect_from = StringName();

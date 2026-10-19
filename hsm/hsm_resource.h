@@ -13,6 +13,7 @@
 #define HSM_RESOURCE_H
 
 #include "../bt/behavior_tree.h"
+#include "hsm_condition.h"
 
 #ifdef LIMBOAI_MODULE
 #include "core/io/resource.h"
@@ -37,6 +38,13 @@ using namespace godot;
 class HSMStateSpec;
 
 // One edge. A null `from` means ANYSTATE -- "there is no state being left".
+//
+// What makes the edge be taken depends on two fields:
+// - `event` set: taken when the event is dispatched. A `condition` then acts as an extra
+//   guard, asked at the moment the event arrives.
+// - `event` empty: a POLLED row. The machine asks its `condition` on every update while the
+//   `from` state is active, and a null condition always passes (a fallback row). Polled rows
+//   are asked in `priority` order, highest first, and the first one that passes decides.
 class HSMTransition : public Resource {
 	GDCLASS(HSMTransition, Resource);
 
@@ -45,6 +53,10 @@ private:
 	Ref<HSMStateSpec> to;
 	StringName event;
 	String note;
+	Ref<HSMCondition> condition;
+	// Higher is asked first. Also handed to LimboState::_can_exit(), which is how a state
+	// says "only something this urgent may take me out of what I am doing".
+	int priority = 0;
 
 protected:
 	static void _bind_methods();
@@ -62,6 +74,15 @@ public:
 	void set_note(const String &p_note);
 	String get_note() const { return note; }
 
+	void set_condition(const Ref<HSMCondition> &p_condition);
+	Ref<HSMCondition> get_condition() const { return condition; }
+
+	void set_priority(int p_priority);
+	int get_priority() const { return priority; }
+
+	// A row with no event is asked on every update instead of waiting for one.
+	bool is_polled() const { return event == StringName(); }
+
 	HSMTransition();
 	~HSMTransition();
 };
@@ -75,6 +96,11 @@ class HSMStateSpec : public Resource {
 private:
 	StringName state_name = "State";
 	Ref<Script> state_script;
+	// Values for the state node's own properties, applied with set() when LimboHSM builds the
+	// node (after the script is attached, before the machine is initialized). Keyed by property
+	// name. This is what lets one script serve several states that differ only in tuning,
+	// without a script per state.
+	Dictionary state_properties;
 	Ref<BehaviorTree> behavior_tree;
 	TypedArray<HSMStateSpec> children;
 	Ref<HSMStateSpec> initial_child;
@@ -102,12 +128,24 @@ private:
 protected:
 	static void _bind_methods();
 
+	// The script's exported properties are offered to the Inspector as `state_props/<name>`,
+	// reading the value in `state_properties` or else the script default, and writing back into
+	// `state_properties`. Editor-only, and never stored: the dictionary is what is saved.
+	bool _set(const StringName &p_name, const Variant &p_value);
+	bool _get(const StringName &p_name, Variant &r_ret) const;
+	void _get_property_list(List<PropertyInfo> *p_list) const;
+	bool _property_can_revert(const StringName &p_name) const;
+	bool _property_get_revert(const StringName &p_name, Variant &r_property) const;
+
 public:
 	void set_state_name(const StringName &p_name);
 	StringName get_state_name() const { return state_name; }
 
 	void set_state_script(const Ref<Script> &p_script);
 	Ref<Script> get_state_script() const { return state_script; }
+
+	void set_state_properties(const Dictionary &p_properties);
+	Dictionary get_state_properties() const { return state_properties; }
 
 	void set_behavior_tree(const Ref<BehaviorTree> &p_tree);
 	Ref<BehaviorTree> get_behavior_tree() const { return behavior_tree; }

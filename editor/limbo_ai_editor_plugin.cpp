@@ -37,6 +37,7 @@
 #include "editor_property_bb_param.h"
 #include "editor_property_property_path.h"
 #include "editor_property_variable_name.h"
+#include "hsm_state_inspector.h"
 
 #ifdef LIMBOAI_MODULE
 #include "core/input/input.h"
@@ -2256,6 +2257,10 @@ void LimboAIEditorPlugin::_notification(int p_notification) {
 			EditorInspectorPluginBBParam *param_plugin = memnew(EditorInspectorPluginBBParam);
 			param_plugin->set_plan_getter(Callable(limbo_ai_editor, "get_edited_blackboard_plan"));
 			add_inspector_plugin(param_plugin);
+
+			EditorInspectorPluginHSMState *state_plugin = memnew(EditorInspectorPluginHSMState);
+			state_plugin->set_view(limbo_ai_editor->get_hsm_view());
+			add_inspector_plugin(state_plugin);
 		} break;
 		case NOTIFICATION_ENTER_TREE: {
 			// Add BehaviorTree to the list of resources that should open in a new inspector.

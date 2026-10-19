@@ -152,6 +152,10 @@ public:
 
 	// Dropped without a signal: every caller of it is already about to redraw the graph.
 	void clear_picked_connection() { _clear_pick(); }
+	// Picks the line between two nodes as if it had been clicked, without the signal: the
+	// caller is the one deciding what to inspect. Does nothing when no line joins the two
+	// (a self-loop is never drawn, so it has nothing to pick).
+	void pick_connection(const StringName &p_from, const StringName &p_to);
 
 	// Every node on the chain and not only the innermost, because a machine is one of them:
 	// a state standing inside `Combat` is two answers to "where is it", and a ring around

@@ -104,6 +104,7 @@
 #include "editor/editor_property_variable_name.h"
 #include "editor/mode_switch_button.h"
 #include "editor/tree_search.h"
+#include "hsm/hsm_condition.h"
 #include "hsm/hsm_resource.h"
 #include "hsm/limbo_hsm.h"
 #include "hsm/limbo_state.h"
@@ -113,6 +114,7 @@
 
 #ifdef TOOLS_ENABLED
 #include "editor/debugger/behavior_tree_view.h"
+#include "editor/hsm_state_inspector.h"
 #include "editor/limbo_ai_editor_plugin.h"
 #endif // TOOLS_ENABLED
 
@@ -149,6 +151,7 @@ void initialize_limboai_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(LimboState);
 		GDREGISTER_CLASS(LimboHSM);
 
+		GDREGISTER_CLASS(HSMCondition);
 		GDREGISTER_CLASS(HSMTransition);
 		GDREGISTER_CLASS(HSMStateSpec);
 		GDREGISTER_CLASS(HierarchicalStateMachine);
@@ -280,6 +283,7 @@ void initialize_limboai_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_INTERNAL_CLASS(HSMGraphEdit);
 		GDREGISTER_INTERNAL_CLASS(HSMNestNode);
 		GDREGISTER_INTERNAL_CLASS(HSMEditorView);
+		GDREGISTER_INTERNAL_CLASS(EditorInspectorPluginHSMState);
 		GDREGISTER_INTERNAL_CLASS(LimboAIEditor);
 		GDREGISTER_INTERNAL_CLASS(LimboAIEditorPlugin);
 		GDREGISTER_INTERNAL_CLASS(TreeSearchPanel);

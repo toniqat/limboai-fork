@@ -303,6 +303,10 @@ void LimboDebugger::_describe_machine(LimboHSM *p_root, LimboState *p_machine, A
 		out.append(from != nullptr ? String(p_root->get_path_to(from)) : String());
 		out.append(String(p_root->get_path_to(to)));
 		out.append(String(row[2]));
+		// Condition name and priority, after the original three so an older reader still
+		// finds what it knows where it knows it.
+		out.append(row.size() > 3 ? String(row[3]) : String());
+		out.append(row.size() > 4 ? int(row[4]) : 0);
 		r_transitions.append(out);
 	}
 }

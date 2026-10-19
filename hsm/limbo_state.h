@@ -62,11 +62,17 @@ protected:
 	virtual void _enter();
 	virtual void _exit();
 	virtual void _update(double p_delta);
+	// Asked by the parent machine before it takes any transition out of this state, polled or
+	// dispatched. `p_priority` is the priority of the row being taken (0 unless the row says
+	// otherwise). The default lets everything through; a state overrides it to declare
+	// commitment, e.g. "do not leave mid reload unless the priority is at least 90".
+	virtual bool _can_exit(LimboState *p_next_state, int p_priority);
 
 	GDVIRTUAL0(_setup);
 	GDVIRTUAL0(_enter);
 	GDVIRTUAL0(_exit);
 	GDVIRTUAL1(_update, double);
+	GDVIRTUAL2R(bool, _can_exit, LimboState *, int);
 
 #ifdef LIMBOAI_GDEXTENSION
 	String _to_string() const { return String(get_name()) + ":<" + get_class() + "#" + itos(get_instance_id()) + ">"; }

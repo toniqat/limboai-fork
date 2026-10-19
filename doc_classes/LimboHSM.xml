@@ -5,6 +5,11 @@
 	</brief_description>
 	<description>
 		Event-based Hierarchical State Machine (HSM) that manages [LimboState] instances and facilitates transitions between them. LimboHSM is a [LimboState] in itself and can also serve as a child of another LimboHSM node.
+		Besides event transitions, a machine can hold [b]polled[/b] transitions: rows with an empty event that are asked on every update while their origin state is active. Each update runs in this order:
+		1. The machine's own [method LimboState._update]. If that changes the active state (for example by dispatching an event), the update ends there.
+		2. The polled rows that leave the active state, together with the polled ANYSTATE rows, are asked in evaluation order: [code]priority[/code] descending, then rows of the active state before ANYSTATE rows, then the order in which they were added (file order for a machine built from a [HierarchicalStateMachine]). The first row whose condition passes decides (a row without a condition always passes). If its target is the active state, the machine stays and nothing below is asked. Otherwise, if [method LimboState._can_exit] of the active state and the target's guard ([method LimboState.set_guard]) allow it, the machine changes to the target immediately; if not, it stays.
+		3. The active substate is updated. After a polled change this is the state just entered, so it runs in the same tick: in nested machines whose levels all use polled transitions, a whole chain of changes settles within one update, and the new leaf state runs at once. Only one polled transition is taken per machine per update (the machine is not polled again after updating the new substate). A change made in step 1 (for example by an event dispatched from the machine's own script) still ends the update without updating the new substate, and an event dispatched during the update still takes effect at the end of the root's update.
+		When built from a [HierarchicalStateMachine] resource, every [HSMCondition] is duplicated per machine and bound to it, so machines sharing one resource never share condition state.
 	</description>
 	<tutorials>
 	</tutorials>
@@ -15,8 +20,13 @@
 			<param index="1" name="to_state" type="LimboState" />
 			<param index="2" name="event" type="StringName" />
 			<param index="3" name="guard" type="Callable" default="Callable()" />
+			<param index="4" name="condition" type="HSMCondition" default="null" />
+			<param index="5" name="priority" type="int" default="0" />
 			<description>
 				Establishes a transition from one state to another when [param event] is dispatched. Both [param from_state] and [param to_state] must be immediate children of this [LimboHSM].
+				If [param event] is empty, the transition is [b]polled[/b]: it is evaluated on every update while [param from_state] is active (or always, if [param from_state] is ANYSTATE), and [param condition] decides whether it is taken (a [code]null[/code] condition always passes). Several polled transitions may leave the same state; [param priority] orders them (higher first). See the class description for the full evaluation order.
+				For an event transition, [param condition] acts as an additional guard, checked when the event arrives. In both cases [param priority] is passed to [method LimboState._can_exit] of the state being left.
+				The condition is used as given (not copied) and is bound to this machine: immediately if the machine is already initialized, otherwise during [method initialize].
 				Optionally, a [param guard] function can be specified, which must return a boolean value. If the guard function returns [code]false[/code], the transition will not occur. The guard function is called immediately before the transition is considered. For a state-wide guard function, check out [method LimboState.set_guard].
 				[codeblock]
 				func my_guard() -&gt; bool:

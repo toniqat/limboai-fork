@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="HSMStateSpec" inherits="Resource" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		One state of a [HierarchicalStateMachine] resource.
+	</brief_description>
+	<description>
+		Describes one state. A state with [member children] is a machine and becomes a [LimboHSM]; otherwise it becomes a [BTState] when it has a [member behavior_tree], or a [LimboState]. A [member state_script] overrides the node type with the script's base.
+		The transitions between the children of a machine are stored in that machine's [member transitions], see [HSMTransition].
+		In the editor, the exported properties of [member state_script] are also shown as [code]state_props/&lt;name&gt;[/code]. They read the value stored in [member state_properties] (or the script default) and write back into it; setting a value equal to the script default, or reverting it, removes the key.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_declared_initial_child" qualifiers="const">
+			<return type="HSMStateSpec" />
+			<description>
+				Returns [member initial_child] as written, without falling back to the first child.
+			</description>
+		</method>
+		<method name="is_machine" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the state has children.
+			</description>
+		</method>
+		<method name="resolve_base_type" qualifiers="const">
+			<return type="StringName" />
+			<description>
+				Returns the class the state node is built as.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="anystate_graph_position" type="Vector2" setter="set_anystate_graph_position" getter="get_anystate_graph_position" default="Vector2(0, 0)">
+			Editor only: where this machine's ANYSTATE node is drawn.
+		</member>
+		<member name="behavior_tree" type="BehaviorTree" setter="set_behavior_tree" getter="get_behavior_tree">
+			The behavior tree run by the state, which makes it a [BTState].
+		</member>
+		<member name="children" type="HSMStateSpec[]" setter="set_children" getter="get_children" default="[]">
+			Child states. A state with children is a machine.
+		</member>
+		<member name="graph_position" type="Vector2" setter="set_graph_position" getter="get_graph_position" default="Vector2(0, 0)">
+			Editor only: where the state is drawn on the graph.
+		</member>
+		<member name="graph_size" type="Vector2" setter="set_graph_size" getter="get_graph_size" default="Vector2(0, 0)">
+			Editor only: the size of a machine's box when resized by hand. Zero means fit to contents.
+		</member>
+		<member name="initial_child" type="HSMStateSpec" setter="set_initial_child" getter="get_declared_initial_child">
+			The child the machine starts in. Defaults to the first child when not set.
+		</member>
+		<member name="state_name" type="StringName" setter="set_state_name" getter="get_state_name" default="&amp;&quot;State&quot;">
+			The name of the state node.
+		</member>
+		<member name="state_properties" type="Dictionary" setter="set_state_properties" getter="get_state_properties" default="{}">
+			Property values for the state node, keyed by property name, for example [code]{"max_suspend": 30.0, "survives": PackedStringArray(["light"])}[/code]. When [LimboHSM] builds the node, each entry is applied with [method Object.set] after [member state_script] is attached and before the machine is initialized, so [method LimboState._setup] already sees them. Values are deep-copied per node, so machines built from the same resource never share them. A key the node has no property for is ignored with a warning (once per state and property).
+			With [member HierarchicalStateMachine.base], a child file overrides the base per key: keys it does not name keep the base's values.
+		</member>
+		<member name="state_script" type="Script" setter="set_state_script" getter="get_state_script">
+			The script attached to the state node.
+		</member>
+		<member name="transitions" type="HSMTransition[]" setter="set_transitions" getter="get_transitions" default="[]">
+			Transitions between this machine's children.
+		</member>
+	</members>
+</class>

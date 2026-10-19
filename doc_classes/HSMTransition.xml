@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="HSMTransition" inherits="Resource" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		One transition row of a [HierarchicalStateMachine] resource.
+	</brief_description>
+	<description>
+		Describes one edge between two sibling states, stored in the [code]transitions[/code] of the machine state that owns them. A row is one of:
+		- [member event] set, [member condition] null: a classic event transition.
+		- [member event] set, [member condition] set: an event transition whose condition is an extra guard.
+		- [member event] empty: a [b]polled[/b] transition, asked on every update while [member from] is active. A null [member condition] always passes, which makes the row a fallback.
+		Polled rows are evaluated by [member priority] (higher first), then rows of the state before ANYSTATE rows, then file order. See [LimboHSM] for the full update order.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="is_polled" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if [member event] is empty, i.e. the row is evaluated on every update rather than on an event.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="condition" type="HSMCondition" setter="set_condition" getter="get_condition">
+			The condition that decides whether the row is taken. For a polled row, [code]null[/code] means always. For an event row, it is an extra guard. Each [LimboHSM] built from the resource uses its own copy.
+		</member>
+		<member name="event" type="StringName" setter="set_event" getter="get_event" default="&amp;&quot;&quot;">
+			The event that triggers the transition. Empty for a polled row.
+		</member>
+		<member name="from" type="HSMStateSpec" setter="set_from" getter="get_from">
+			The state being left. [code]null[/code] means ANYSTATE: the row applies whichever state is active.
+		</member>
+		<member name="note" type="String" setter="set_note" getter="get_note" default="&quot;&quot;">
+			A free text note for the editor. Has no effect at runtime.
+		</member>
+		<member name="priority" type="int" setter="set_priority" getter="get_priority" default="0">
+			Evaluation order of polled rows, higher first. Also passed to [method LimboState._can_exit] of the state being left, for event rows too.
+		</member>
+		<member name="to" type="HSMStateSpec" setter="set_to" getter="get_to">
+			The destination state.
+		</member>
+	</members>
+</class>

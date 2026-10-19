@@ -11,6 +11,20 @@
 	<tutorials>
 	</tutorials>
 	<methods>
+		<method name="_can_exit" qualifiers="virtual">
+			<return type="bool" />
+			<param index="0" name="next_state" type="LimboState" />
+			<param index="1" name="priority" type="int" />
+			<description>
+				Called by the parent [LimboHSM] before any transition out of this state is taken, whether polled or triggered by an event. [param priority] is the priority of the transition row (0 unless set). Return [code]false[/code] to stay. The default implementation returns [code]true[/code].
+				Use it to declare commitment, for example to finish an action unless something urgent happens:
+				[codeblock]
+				func _can_exit(next_state: LimboState, priority: int) -&gt; bool:
+				    return not is_reloading or priority &gt;= 90
+				[/codeblock]
+				A blocked polled transition stops the evaluation of lower rows for this update. A blocked event transition is not consumed.
+			</description>
+		</method>
 		<method name="_enter" qualifiers="virtual">
 			<return type="void" />
 			<description>

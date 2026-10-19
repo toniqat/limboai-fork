@@ -137,6 +137,14 @@ Ref<HierarchicalStateMachine> _machine_from_report(const String &p_root_name, co
 		transition->set_from(from);
 		transition->set_to(to);
 		transition->set_event(StringName(row[2]));
+		if (row.size() > 4) {
+			transition->set_priority(int(row[4]));
+		}
+		if (row.size() > 3 && !String(row[3]).is_empty()) {
+			// Only the name travels: the condition is a script object living in the game, and
+			// what the picture needs from it is something to call the row by.
+			transition->set_note(vformat("Condition: %s", String(row[3])));
+		}
 		TypedArray<HSMTransition> rows = owner->get_transitions();
 		rows.append(transition);
 		owner->set_transitions(rows);

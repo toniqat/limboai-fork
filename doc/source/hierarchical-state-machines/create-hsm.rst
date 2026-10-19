@@ -138,6 +138,55 @@ State anatomy
     func _update(delta: float) -> void:
         pass
 
+    ## Called before the parent machine takes a transition out of this state.
+    ## Return false to stay. `priority` is the priority of the transition row.
+    func _can_exit(next_state: LimboState, priority: int) -> bool:
+        return true
+
+
+Polled transitions and conditions
+---------------------------------
+
+A transition with an **empty event** is *polled*: the machine evaluates it on every update
+while its origin state is active, instead of waiting for an event. Whether it is taken is
+decided by an :ref:`HSMCondition<class_HSMCondition>` resource (no condition means "always").
+
+.. code:: gdscript
+
+    # in_combat.gd
+    @tool
+    extends HSMCondition
+
+    func _check() -> bool:
+        return blackboard.get_var(&"in_combat", false)
+
+.. code:: gdscript
+
+    hsm.add_transition(hsm.anystate(), combat_state, &"", Callable(), load("res://in_combat.gd").new(), 80)
+    hsm.add_transition(combat_state, idle_state, &"")  # fallback, priority 0
+
+On each update the machine first runs its own ``_update``, then evaluates the polled rows of the
+active state together with the polled ANYSTATE rows, ordered by priority (higher first), then
+the state's own rows before ANYSTATE rows, then file order. The first row whose condition passes
+decides: if it targets the active state, the machine stays; otherwise it changes state at once if
+``_can_exit`` of the active state and the target's guard allow it, and stays if not. Lower rows
+are never asked once a row has passed. Finally the active state is updated. After a polled
+change that is the state just entered, in the same tick, so a chain of polled changes through
+nested machines settles within one update and the new leaf runs immediately. Each machine takes
+at most one polled transition per update. A change caused by the machine's own ``_update`` or
+by a dispatched event keeps the old rule: the new state is first updated on the next tick.
+
+In a :ref:`HierarchicalStateMachine<class_HierarchicalStateMachine>` resource, the same is
+expressed with :ref:`HSMTransition<class_HSMTransition>` rows that leave ``event`` empty and set
+``condition`` and ``priority``. Each machine built from the resource uses its own copy of every
+condition, bound to that machine's blackboard and agent.
+
+A state in such a resource can also carry ``state_properties``, a dictionary of values applied
+to the state node (with ``set()``) when it is built, before ``_setup`` runs. This lets one state
+script serve several states that differ only in their exported settings. In the editor, the
+script's exported properties are shown on the state as ``state_props/<name>`` and edit the
+dictionary.
+
 
 Using behavior trees with state machines
 ----------------------------------------

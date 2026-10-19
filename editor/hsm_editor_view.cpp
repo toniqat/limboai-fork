@@ -115,6 +115,9 @@ Ref<HSMStateSpec> _clone_state(const Ref<HSMStateSpec> &p_src, HashMap<uint64_t,
 	copy->set_scene_unique_id(p_src->get_scene_unique_id());
 	copy->set_state_name(p_src->get_state_name());
 	copy->set_state_script(p_src->get_state_script());
+	// Duplicated: the dictionary is a value, and a snapshot that shared it would be changed by
+	// the very edit it is meant to undo.
+	copy->set_state_properties(p_src->get_state_properties().duplicate());
 	copy->set_behavior_tree(p_src->get_behavior_tree());
 	copy->set_graph_position(p_src->get_graph_position());
 	copy->set_graph_size(p_src->get_graph_size());
@@ -164,6 +167,11 @@ Ref<HSMStateSpec> _clone_tree(const Ref<HSMStateSpec> &p_root) {
 			copy->set_to(_mapped(map, row->get_to()));
 			copy->set_event(row->get_event());
 			copy->set_note(row->get_note());
+			// Shared, not copied. The condition is a sub-resource with exported settings of its
+			// own, and those are edited (and undone) by the Inspector on that very object; a
+			// snapshot that swapped it for a copy would cut the Inspector's history loose.
+			copy->set_condition(row->get_condition());
+			copy->set_priority(row->get_priority());
 			out.append(copy);
 		}
 		pair.copy->set_transitions(out);
@@ -1142,6 +1150,9 @@ void HSMEditorView::_open_node_menu(const StringName &p_name) {
 		String text = String::utf8("→ ") + String(row->get_to()->get_state_name());
 		if (!String(row->get_event()).is_empty()) {
 			text += vformat(" (%s)", row->get_event());
+		} else if (row->get_condition().is_valid()) {
+			// A polled row has no event to tell it apart, so its condition does.
+			text += vformat(" [%s]", row->get_condition()->get_display_name());
 		}
 		transition_menu->add_item(text, i);
 		outgoing += 1;
@@ -1290,6 +1301,9 @@ void HSMEditorView::_on_connection_menu_requested(const StringName &p_from, cons
 			// Which of the rows this one is. Between the same two states that is the only
 			// thing telling them apart, which is why the pair alone could not be the menu.
 			text += vformat(" (%s)", row->get_event());
+		} else if (row->get_condition().is_valid()) {
+			// A polled row: its condition is what tells it from another polled row.
+			text += vformat(" [%s]", row->get_condition()->get_display_name());
 		}
 		line_menu->add_item(text, found[i]);
 	}
@@ -1334,19 +1348,203 @@ Ref<HSMTransition> HSMEditorView::_authored_transition(const Ref<HSMStateSpec> &
 		return nullptr;
 	}
 
-	// Matched on the event too, not just the pair: which of two edges between the same
-	// states this is, is the one thing a pair of endpoints never says.
 	TypedArray<HSMTransition> rows = owner->get_transitions();
+	// Without a base the drawn row is the authored row itself, and that is the only answer
+	// that cannot be fooled by two rows that look alike.
+	for (int i = 0; i < rows.size(); i++) {
+		if (Ref<HSMTransition>(rows[i]) == p_row) {
+			return p_row;
+		}
+	}
+	// Matched on the event, the condition and the priority too, not just the pair: which of
+	// two edges between the same states this is, is the one thing a pair of endpoints never
+	// says. Polled rows all have the same (empty) event, so the condition is what tells them
+	// apart -- the merge hands the authored condition on by reference, so it compares as is.
 	for (int i = 0; i < rows.size(); i++) {
 		Ref<HSMTransition> row = rows[i];
 		if (row.is_null()) {
 			continue;
 		}
-		if (row->get_to() == to_authored && row->get_from() == from_authored && row->get_event() == p_row->get_event()) {
+		if (row->get_to() == to_authored && row->get_from() == from_authored && row->get_event() == p_row->get_event() &&
+				row->get_condition() == p_row->get_condition() && row->get_priority() == p_row->get_priority()) {
 			return row;
 		}
 	}
 	return nullptr;
+}
+
+Ref<HSMStateSpec> HSMEditorView::_drawn_machine_by_id(uint64_t p_id) const {
+	if (merged_root.is_valid() && merged_root->get_instance_id() == p_id) {
+		return merged_root;
+	}
+	const StringName *name = node_names.getptr(p_id);
+	if (name == nullptr) {
+		return nullptr;
+	}
+	const DrawnState *entry = drawn.getptr(*name);
+	return entry != nullptr ? entry->spec : Ref<HSMStateSpec>();
+}
+
+namespace {
+
+// One line of the state inspector. Parts that say nothing are left out rather than shown
+// blank, so a plain event row stays as short as it always was.
+String _transition_line(const String &p_head, const Ref<HSMTransition> &p_row, bool p_with_note) {
+	PackedStringArray parts;
+	parts.push_back(p_head);
+	if (p_row->get_condition().is_valid()) {
+		parts.push_back(p_row->get_condition()->get_display_name());
+	}
+	if (!String(p_row->get_event()).is_empty()) {
+		parts.push_back(String(p_row->get_event()));
+	}
+	if (p_with_note && !p_row->get_note().strip_edges().is_empty()) {
+		// The first line only: a note is free text, and a paragraph would make one row of the
+		// list taller than the rest of it.
+		parts.push_back(p_row->get_note().strip_edges().get_slice("\n", 0));
+	}
+	return String("  |  ").join(parts);
+}
+
+String _state_label(const Ref<HSMStateSpec> &p_state) {
+	return p_state.is_valid() ? String(p_state->get_state_name()) : String("Any");
+}
+
+} // namespace
+
+Dictionary HSMEditorView::describe_state_transitions(const Ref<HSMStateSpec> &p_authored) const {
+	Dictionary out;
+	if (p_authored.is_null() || hsm.is_null()) {
+		return out;
+	}
+	// The drawn state standing for it: the state itself without a base, or the merged copy
+	// whose origin it is.
+	const DrawnState *entry = nullptr;
+	for (const KeyValue<StringName, DrawnState> &E : drawn) {
+		if (E.value.spec == p_authored || E.value.spec->get_origin() == p_authored) {
+			entry = &E.value;
+			break;
+		}
+	}
+	if (entry == nullptr || entry->machine.is_null()) {
+		return out;
+	}
+	const Ref<HSMStateSpec> &state = entry->spec;
+	const Ref<HSMStateSpec> &machine = entry->machine;
+	int64_t machine_id = int64_t(machine->get_instance_id());
+	TypedArray<HSMTransition> rows = machine->get_transitions();
+
+	// Outgoing, in evaluation order: the same stable sort LimboHSM does when it orders the
+	// polled rows of one state, so the list reads top-down the way the machine asks.
+	Vector<int> order;
+	for (int i = 0; i < rows.size(); i++) {
+		Ref<HSMTransition> row = rows[i];
+		if (row.is_null() || row->get_to().is_null()) {
+			continue;
+		}
+		if (row->get_from().is_valid() && row->get_from() != state) {
+			continue;
+		}
+		bool any = row->get_from().is_null();
+		int pos = order.size();
+		while (pos > 0) {
+			Ref<HSMTransition> prev = rows[order[pos - 1]];
+			bool prev_any = prev->get_from().is_null();
+			bool goes_before = row->get_priority() > prev->get_priority() || (row->get_priority() == prev->get_priority() && !any && prev_any);
+			if (!goes_before) {
+				break;
+			}
+			pos -= 1;
+		}
+		order.insert(pos, i);
+	}
+	Array outgoing;
+	for (int i = 0; i < order.size(); i++) {
+		Ref<HSMTransition> row = rows[order[i]];
+		String head = vformat("[%d] -> %s", row->get_priority(), _state_label(row->get_to()));
+		if (row->get_from().is_null()) {
+			// Said, because the row is not one of this state's own: it is the machine's, and
+			// it applies here only because it applies everywhere.
+			head += " (Any)";
+		}
+		Dictionary line;
+		line["text"] = _transition_line(head, row, true);
+		line["machine"] = machine_id;
+		line["row"] = order[i];
+		line["inherited"] = const_cast<HSMEditorView *>(this)->_authored_transition(machine, row).is_null();
+		outgoing.push_back(line);
+	}
+
+	Array incoming;
+	for (int i = 0; i < rows.size(); i++) {
+		Ref<HSMTransition> row = rows[i];
+		if (row.is_null() || row->get_to() != state) {
+			continue;
+		}
+		String head = vformat("[%d] %s ->", row->get_priority(), _state_label(row->get_from()));
+		Dictionary line;
+		line["text"] = _transition_line(head, row, false);
+		line["machine"] = machine_id;
+		line["row"] = i;
+		line["inherited"] = const_cast<HSMEditorView *>(this)->_authored_transition(machine, row).is_null();
+		incoming.push_back(line);
+	}
+
+	out["outgoing"] = outgoing;
+	out["incoming"] = incoming;
+	return out;
+}
+
+void HSMEditorView::select_transition(int64_t p_machine_id, int p_row) {
+	Ref<HSMStateSpec> machine = _drawn_machine_by_id(uint64_t(p_machine_id));
+	if (machine.is_null()) {
+		return;
+	}
+	TypedArray<HSMTransition> rows = machine->get_transitions();
+	if (p_row < 0 || p_row >= rows.size()) {
+		return;
+	}
+	Ref<HSMTransition> row = rows[p_row];
+	if (row.is_null() || row->get_to().is_null()) {
+		return;
+	}
+	const StringName *to = node_names.getptr(row->get_to()->get_instance_id());
+	if (to == nullptr) {
+		return;
+	}
+	StringName from;
+	if (row->get_from().is_valid()) {
+		const StringName *found = node_names.getptr(row->get_from()->get_instance_id());
+		if (found == nullptr) {
+			return;
+		}
+		from = *found;
+	} else {
+		from = _anystate_node_name_for(machine);
+	}
+
+	// The node selection goes, because the Inspector is about to stop showing that node: a
+	// box still marked as picked would claim the Inspector is about it.
+	updating = true;
+	for (int i = 0; i < graph->get_child_count(); i++) {
+		GraphNode *node = Object::cast_to<GraphNode>(graph->get_child(i));
+		if (node != nullptr) {
+			node->set_selected(false);
+		}
+	}
+	updating = false;
+	graph->pick_connection(from, *to);
+
+	if (read_only) {
+		return;
+	}
+	Ref<HSMTransition> authored = _authored_transition(machine, row);
+	if (authored.is_valid()) {
+		EditorInterface::get_singleton()->edit_resource(authored);
+	} else {
+		// Inherited, the same as a click on its line: there is nothing in this file to edit.
+		EditorInterface::get_singleton()->inspect_object(nullptr);
+	}
 }
 
 // Cutting a row that came from the base would cut it for every machine that inherits it.
@@ -1745,7 +1943,9 @@ void HSMEditorView::_on_connect_to_requested(const StringName &p_from, const Str
 	row->set_from(from_authored);
 	row->set_to(to_authored);
 	// The event is left empty on purpose -- it is the one thing the graph cannot guess,
-	// and the inspector shows it as the blank it is.
+	// and the inspector shows it as the blank it is. Note that a row with no event and no
+	// condition is a polled fallback that always passes, so a fresh edge is live until it
+	// is given an event or a condition.
 
 	TypedArray<HSMTransition> rows = owner->get_transitions();
 	rows.append(row);
@@ -1930,6 +2130,9 @@ void HSMEditorView::_bind_methods() {
 	// Bound because the undo history calls it by name -- it is the one method here that is
 	// invoked from outside this class.
 	ClassDB::bind_method(D_METHOD("_restore_root", "target", "root"), &HSMEditorView::_restore_root);
+	// Reached by the HSMStateSpec inspector plugin through a deferred call.
+	ClassDB::bind_method(D_METHOD("select_transition", "machine_id", "row"), &HSMEditorView::select_transition);
+	ClassDB::bind_method(D_METHOD("describe_state_transitions", "state"), &HSMEditorView::describe_state_transitions);
 
 	ADD_SIGNAL(MethodInfo("hsm_edited"));
 	// Which state the picture is on. The main screen answers it with the tree pane below;

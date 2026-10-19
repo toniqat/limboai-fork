@@ -248,6 +248,8 @@ private:
 	// base. Matched on the event too: which of two rows between the same pair this is, is
 	// the one thing a pair of endpoints cannot say.
 	Ref<HSMTransition> _authored_transition(const Ref<HSMStateSpec> &p_machine, const Ref<HSMTransition> &p_row);
+	// The drawn machine with this instance id: the merged root or any nested machine.
+	Ref<HSMStateSpec> _drawn_machine_by_id(uint64_t p_id) const;
 	bool _remove_transition(const Ref<HSMStateSpec> &p_machine, const Ref<HSMTransition> &p_row);
 	// Every drawn row running between two nodes, in either direction -- which is what one
 	// line on the graph stands for.
@@ -302,6 +304,18 @@ public:
 	// exactly the picture and the picking. Set once, by whoever built the view.
 	void set_read_only(bool p_read_only);
 	bool is_read_only() const { return read_only; }
+
+	// What the HSMStateSpec inspector lists for a state of the open file. Answered from the
+	// merged tree, so inherited rows show too. Returns {"outgoing": [...], "incoming": [...]},
+	// each line a {"text", "machine", "row", "inherited"} Dictionary where `machine` is the
+	// drawn machine's instance id and `row` the index in its transitions; outgoing lines are
+	// in the order LimboHSM evaluates polled rows (priority descending, the state's own rows
+	// before ANYSTATE rows, then file order). Empty when the state is not on screen.
+	Dictionary describe_state_transitions(const Ref<HSMStateSpec> &p_authored) const;
+	// Picks the edge a row is drawn as and inspects the row, the same as clicking the line
+	// would, except that the row is named exactly (a click on a line that stands for two rows
+	// cannot say which one was meant).
+	void select_transition(int64_t p_machine_id, int p_row);
 
 	// Where the machine is standing, outermost first. Everything off the chain is dimmed:
 	// the question a running machine is being asked is "where is it", and one lit line

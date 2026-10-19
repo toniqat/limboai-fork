@@ -102,6 +102,14 @@ void LimboState::_update(double p_delta) {
 	emit_signal(LW_NAME(updated), p_delta);
 }
 
+bool LimboState::_can_exit(LimboState *p_next_state, int p_priority) {
+	bool ret = true;
+	if (GDVIRTUAL_CALL(_can_exit, p_next_state, p_priority, ret)) {
+		return ret;
+	}
+	return true;
+}
+
 void LimboState::_setup() {
 	GDVIRTUAL_CALL(_setup);
 	emit_signal(LW_NAME(setup));
@@ -243,6 +251,7 @@ void LimboState::_bind_methods() {
 	GDVIRTUAL_BIND(_enter);
 	GDVIRTUAL_BIND(_exit);
 	GDVIRTUAL_BIND(_update, "delta");
+	GDVIRTUAL_BIND(_can_exit, "next_state", "priority");
 
 	ADD_PROPERTY(PropertyInfo(Variant::STRING_NAME, "EVENT_FINISHED", PROPERTY_HINT_NONE, "", 0), "", "event_finished");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "agent", PROPERTY_HINT_RESOURCE_TYPE, "Node", 0), "set_agent", "get_agent");

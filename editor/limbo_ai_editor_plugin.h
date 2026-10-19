@@ -312,6 +312,9 @@ public:
 	void edit_bt(const Ref<BehaviorTree> &p_behavior_tree, bool p_force_refresh = false);
 	void edit_hsm(const Ref<HierarchicalStateMachine> &p_hsm, bool p_force_refresh = false);
 	Ref<BlackboardPlan> get_edited_blackboard_plan();
+	// For the HSMStateSpec inspector plugin, which lists a state's transitions as the view
+	// has them merged and jumps to one when its line is clicked.
+	HSMEditorView *get_hsm_view() const { return hsm_view; }
 	void set_window_layout(const Ref<ConfigFile> &p_configuration);
 	void get_window_layout(const Ref<ConfigFile> &p_configuration);
 
