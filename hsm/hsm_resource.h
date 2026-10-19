@@ -199,6 +199,8 @@ private:
 	String description;
 	Ref<HSMStateSpec> root;
 	Ref<HierarchicalStateMachine> base;
+	// Variables of the machine's root scope (the LimboHSM built from this file).
+	Ref<BlackboardPlan> blackboard_plan;
 
 protected:
 	static void _bind_methods();
@@ -220,6 +222,13 @@ public:
 
 	void set_base(const Ref<HierarchicalStateMachine> &p_base);
 	Ref<HierarchicalStateMachine> get_base() const { return base; }
+
+	void set_blackboard_plan(const Ref<BlackboardPlan> &p_plan);
+	Ref<BlackboardPlan> get_blackboard_plan() const { return blackboard_plan; }
+
+	// The plan the built machine uses: this file's own, else the nearest base's. A child
+	// file does not merge variables onto its base's plan; it replaces it whole or not at all.
+	Ref<BlackboardPlan> get_effective_blackboard_plan() const;
 
 	// The machine as it actually runs: the base's states, plus whatever this file adds
 	// on top. Without a base this is `root` itself -- there is nothing to merge, and

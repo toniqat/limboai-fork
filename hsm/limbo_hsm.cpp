@@ -225,6 +225,13 @@ void LimboHSM::build_from_resource() {
 
 	built_from_resource = true;
 
+	// The file's plan becomes this machine's root scope plan; _initialize() populates it
+	// before the children, so their plans can link to these variables.
+	Ref<BlackboardPlan> plan = hsm->get_effective_blackboard_plan();
+	if (plan.is_valid()) {
+		set_blackboard_plan(plan);
+	}
+
 	// The root state is this node -- it is not instantiated, only its children are.
 	HashMap<uint64_t, LimboState *> nodes;
 	nodes[root->get_instance_id()] = this;

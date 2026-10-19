@@ -70,6 +70,9 @@ protected:
 #endif
 
 public:
+	// Project setting: link plan variables to same-name parent scope variables (implicit mapping).
+	static constexpr const char *LINK_SAME_NAME_SETTING = "limbo_ai/blackboard/link_same_name_vars_to_parent";
+
 	void set_base_plan(const Ref<BlackboardPlan> &p_base);
 	Ref<BlackboardPlan> get_base_plan() const { return base; }
 

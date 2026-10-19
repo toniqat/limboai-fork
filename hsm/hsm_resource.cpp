@@ -387,6 +387,26 @@ void HierarchicalStateMachine::set_base(const Ref<HierarchicalStateMachine> &p_b
 	emit_changed();
 }
 
+void HierarchicalStateMachine::set_blackboard_plan(const Ref<BlackboardPlan> &p_plan) {
+	blackboard_plan = p_plan;
+	emit_changed();
+}
+
+Ref<BlackboardPlan> HierarchicalStateMachine::get_effective_blackboard_plan() const {
+	if (blackboard_plan.is_valid()) {
+		return blackboard_plan;
+	}
+	// Bounded walk: a `base` cycle is reported by get_effective_root(), not here.
+	Ref<HierarchicalStateMachine> node = base;
+	for (int depth = 0; node.is_valid() && depth < 64; depth++) {
+		if (node->get_blackboard_plan().is_valid()) {
+			return node->get_blackboard_plan();
+		}
+		node = node->get_base();
+	}
+	return Ref<BlackboardPlan>();
+}
+
 namespace {
 
 // One drawn/built state and the authored state it came from. Kept in visit order so that
@@ -607,10 +627,14 @@ void HierarchicalStateMachine::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_base", "base"), &HierarchicalStateMachine::set_base);
 	ClassDB::bind_method(D_METHOD("get_base"), &HierarchicalStateMachine::get_base);
 	ClassDB::bind_method(D_METHOD("get_effective_root"), &HierarchicalStateMachine::get_effective_root);
+	ClassDB::bind_method(D_METHOD("set_blackboard_plan", "plan"), &HierarchicalStateMachine::set_blackboard_plan);
+	ClassDB::bind_method(D_METHOD("get_blackboard_plan"), &HierarchicalStateMachine::get_blackboard_plan);
+	ClassDB::bind_method(D_METHOD("get_effective_blackboard_plan"), &HierarchicalStateMachine::get_effective_blackboard_plan);
 
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "description", PROPERTY_HINT_MULTILINE_TEXT), "set_description", "get_description");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "base", PROPERTY_HINT_RESOURCE_TYPE, "HierarchicalStateMachine"), "set_base", "get_base");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "root", PROPERTY_HINT_RESOURCE_TYPE, "HSMStateSpec"), "set_root", "get_root");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "blackboard_plan", PROPERTY_HINT_RESOURCE_TYPE, "BlackboardPlan"), "set_blackboard_plan", "get_blackboard_plan");
 }
 
 HierarchicalStateMachine::HierarchicalStateMachine() {

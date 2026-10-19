@@ -12,6 +12,7 @@
 #include "blackboard_plan.h"
 
 #include "../compat/editor_settings.h"
+#include "../compat/project_settings.h"
 #include "../compat/scene_tree.h"
 #include "../compat/translation.h"
 #include "../util/limbo_utility.h"
@@ -520,6 +521,7 @@ Ref<Blackboard> BlackboardPlan::create_blackboard(Node *p_prefetch_root, const R
 void BlackboardPlan::populate_blackboard(const Ref<Blackboard> &p_blackboard, bool overwrite, Node *p_prefetch_root, Node *p_prefetch_root_for_base_plan) {
 	ERR_FAIL_COND(p_prefetch_root == nullptr && prefetch_nodepath_vars);
 	ERR_FAIL_COND(p_blackboard.is_null());
+	const bool link_same_name = p_blackboard->get_parent().is_valid() && bool(GLOBAL_GET(LINK_SAME_NAME_SETTING));
 	for (const Pair<StringName, BBVariable> &p : var_list) {
 		if (p_blackboard->has_local_var(p.first) && !overwrite) {
 #ifdef DEBUG_ENABLED
@@ -574,11 +576,33 @@ void BlackboardPlan::populate_blackboard(const Ref<Blackboard> &p_blackboard, bo
 			Node *n = binding_root->get_node_or_null(node_path);
 			ERR_CONTINUE_MSG(n == nullptr, vformat("BlackboardPlan: Binding failed for variable %s using property path: %s", LimboUtility::get_singleton()->decorate_var(p.first), binding_path));
 			var.bind(n, prop_name);
+		} else if (link_same_name) {
+			// Implicit mapping: the nearest parent scope that holds a variable of the same name
+			// shares it with this scope. Without one the variable stays local.
+			for (Ref<Blackboard> scope = p_blackboard->get_parent(); scope.is_valid(); scope = scope->get_parent()) {
+				if (!scope->has_local_var(p.first)) {
+					continue;
+				}
+#ifdef DEBUG_ENABLED
+				Variant::Type parent_type = scope->get_var(p.first, Variant(), false).get_type();
+				Variant::Type planned_type = p.second.get_type();
+				if (parent_type != planned_type && parent_type != Variant::NIL && planned_type != Variant::NIL) {
+					WARN_PRINT(vformat("BlackboardPlan: %s is linked to a parent scope variable of another type (%s, planned %s). File: %s",
+							LimboUtility::get_singleton()->decorate_var(p.first), Variant::get_type_name(parent_type), Variant::get_type_name(planned_type), get_path()));
+				}
+#endif
+				p_blackboard->link_var(p.first, scope, p.first);
+				break;
+			}
 		}
 	}
 }
 
 void BlackboardPlan::_bind_methods() {
+	// Off by default (upstream behaviour). When on, a plan variable without an explicit mapping
+	// or property binding links to the same-name variable of the nearest parent scope.
+	GLOBAL_DEF(LINK_SAME_NAME_SETTING, false);
+
 	ClassDB::bind_method(D_METHOD("set_prefetch_nodepath_vars", "enable"), &BlackboardPlan::set_prefetch_nodepath_vars);
 	ClassDB::bind_method(D_METHOD("is_prefetching_nodepath_vars"), &BlackboardPlan::is_prefetching_nodepath_vars);
 
