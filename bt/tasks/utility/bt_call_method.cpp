@@ -21,6 +21,29 @@
 
 #ifdef LIMBOAI_GDEXTENSION
 #include <godot_cpp/classes/engine.hpp>
+
+namespace {
+
+// What Variant::get_call_error_text says in the module build, for the cases a call by name
+// can actually run into here. godot-cpp has no counterpart of that function.
+String _call_error_text(const GDExtensionCallError &p_error, int p_argument_count) {
+	switch (p_error.error) {
+		case GDEXTENSION_CALL_ERROR_INVALID_METHOD:
+			return "method not found";
+		case GDEXTENSION_CALL_ERROR_INVALID_ARGUMENT:
+			return vformat("cannot convert argument %d to %s", p_error.argument + 1, Variant::get_type_name(Variant::Type(p_error.expected)));
+		case GDEXTENSION_CALL_ERROR_TOO_MANY_ARGUMENTS:
+			return vformat("too many arguments (%d given, %d expected)", p_argument_count, p_error.expected);
+		case GDEXTENSION_CALL_ERROR_TOO_FEW_ARGUMENTS:
+			return vformat("too few arguments (%d given, %d expected)", p_argument_count, p_error.expected);
+		case GDEXTENSION_CALL_ERROR_INSTANCE_IS_NULL:
+			return "instance is null";
+		default:
+			return vformat("call error %d", int(p_error.error));
+	}
+}
+
+} // namespace
 #endif // LIMBOAI_GDEXTENSION
 
 //**** Setters / Getters
@@ -132,8 +155,19 @@ BT::Status BTCallMethod::_tick(double p_delta) {
 		call_args.push_back(param->get_value(get_scene_root(), get_blackboard()));
 	}
 
-	// TODO: Unsure how to detect call error, so we return SUCCESS for now...
-	result = obj->callv(method, call_args);
+	// Through Variant::callp rather than Object::callv, which drops the call error: a
+	// misspelled method or a wrong argument count then came out as SUCCESS on every step that
+	// does not ask for a bool. Now it fails and says why, as the module build does.
+	Vector<const Variant *> argptrs;
+	argptrs.resize(call_args.size());
+	for (int i = 0; i < call_args.size(); i++) {
+		argptrs.write[i] = &call_args[i];
+	}
+	GDExtensionCallError ce;
+	Variant(obj).callp(method, argptrs.ptrw(), argptrs.size(), result, ce);
+	if (ce.error != GDEXTENSION_CALL_OK) {
+		ERR_FAIL_V_MSG(FAILURE, vformat("BTCallMethod: Error calling method `%s` on %s: %s.", method, node_param->to_string(), _call_error_text(ce, argptrs.size())));
+	}
 #endif // LIMBOAI_MODULE & LIMBOAI_GDEXTENSION
 
 	if (result_var != StringName()) {
@@ -142,8 +176,8 @@ BT::Status BTCallMethod::_tick(double p_delta) {
 
 	if (status_from_result) {
 		// Only a bool answers. Anything else, null included, is a method that was not written
-		// to be asked (or a call that failed, which the GDExtension build cannot tell apart),
-		// and passing it as a yes would hide that.
+		// to be asked (a call that failed has already returned above), and passing it as a
+		// yes would hide that.
 		ERR_FAIL_COND_V_MSG(result.get_type() != Variant::BOOL, FAILURE, vformat("BTCallMethod: `%s` returned %s, not a bool. Returning FAILURE.", method, Variant::get_type_name(result.get_type())));
 		return bool(result) ? SUCCESS : FAILURE;
 	}
