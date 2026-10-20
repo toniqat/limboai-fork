@@ -79,6 +79,10 @@ public:
 	void bind(Object *p_object, const StringName &p_property);
 	void unbind();
 
+	// Whether the two are one variable (a link shares the data, a copy does not), which ==
+	// cannot say: it also answers yes for two separate variables holding equal values.
+	_FORCE_INLINE_ bool shares_data_with(const BBVariable &p_other) const { return data == p_other.data; }
+
 	bool operator==(const BBVariable &p_var) const;
 	bool operator!=(const BBVariable &p_var) const;
 	void operator=(const BBVariable &p_var);

@@ -33,6 +33,7 @@
 #include "scene/gui/panel_container.h"
 #include "scene/gui/split_container.h"
 #include "scene/gui/texture_rect.h"
+#include "scene/gui/tree.h"
 #include "core/templates/hash_map.h"
 #endif // LIMBOAI_MODULE
 
@@ -48,6 +49,9 @@
 #include <godot_cpp/classes/line_edit.hpp>
 #include <godot_cpp/classes/panel_container.hpp>
 #include <godot_cpp/classes/texture_rect.hpp>
+#include <godot_cpp/classes/tree.hpp>
+#include <godot_cpp/classes/tree_item.hpp>
+#include <godot_cpp/templates/hash_set.hpp>
 #include <godot_cpp/classes/v_box_container.hpp>
 #include <godot_cpp/classes/v_split_container.hpp>
 #include <godot_cpp/templates/hash_map.hpp>
@@ -134,6 +138,21 @@ private:
 	EditorSpinSlider *update_interval = nullptr;
 	CompatWindowWrapper *window_wrapper = nullptr;
 
+	// The blackboard column: the scopes of the tree being shown (or of the machine, when the
+	// state it stands in has none), innermost first, read only. The game sends it only while
+	// the column is open.
+	Button *bb_toggle = nullptr;
+	VBoxContainer *bb_box = nullptr;
+	LineEdit *bb_filter = nullptr;
+	Tree *bb_tree = nullptr;
+	// Unfolded containers, by path of names from the variable down. Kept across characters
+	// and trees, so "record > ai" stays open while the watched character changes.
+	HashSet<String> bb_expanded;
+	// Folded scopes, by label.
+	HashSet<String> bb_folded_scopes;
+	// Set while the rows are being written, when Tree reports folds the code made itself.
+	bool bb_syncing = false;
+
 	void _reset_controls();
 	void _show_alert(const String &p_message);
 	// Rebuilds the rows out of the two lists and puts them on screen. One call for both
@@ -161,6 +180,18 @@ private:
 	void _window_visibility_changed(bool p_visible);
 	void _resource_header_pressed();
 
+	// Asks the game to start or stop sending the blackboard, with the interval and the
+	// unfolded paths. Called whenever any of the three changes.
+	void _send_blackboard_tracking();
+	void _bb_toggled(bool p_open);
+	void _bb_interval_changed(double p_value);
+	void _bb_item_collapsed(TreeItem *p_item);
+	void _bb_filter_changed(String p_text);
+	// Writes the reported rows under p_parent, reusing the items already there so the
+	// scroll position, the selection and the folds survive an update.
+	void _bb_sync_rows(TreeItem *p_parent, const Array &p_rows, const String &p_parent_path);
+	void _bb_apply_filter();
+
 protected:
 	static void _bind_methods();
 	void _notification(int p_what);
@@ -178,6 +209,7 @@ public:
 	BehaviorTreeView *get_behavior_tree_view() const { return bt_view; }
 	uint64_t get_selected_bt_instance_id();
 	void update_behavior_tree(const Ref<BehaviorTreeData> &p_data);
+	void update_blackboard(const Array &p_data);
 
 	void setup(Ref<EditorDebuggerSession> p_session, CompatWindowWrapper *p_wrapper);
 	LimboDebuggerTab();

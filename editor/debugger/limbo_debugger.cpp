@@ -15,9 +15,19 @@
 #include "../../bt/bt_state.h"
 #include "../../compat/debugger.h"
 #include "../../compat/object.h"
+#include "../../compat/scene_tree.h"
 #include "../../hsm/limbo_hsm.h"
 #include "../../util/limbo_string_names.h"
 #include "behavior_tree_data.h"
+
+#ifdef LIMBOAI_MODULE
+#include "core/os/time.h"
+#endif // LIMBOAI_MODULE
+
+#ifdef LIMBOAI_GDEXTENSION
+#include <godot_cpp/classes/resource.hpp>
+#include <godot_cpp/classes/time.hpp>
+#endif // LIMBOAI_GDEXTENSION
 
 //**** LimboDebugger
 
@@ -66,8 +76,13 @@ Error LimboDebugger::parse_message(void *p_user, const String &p_msg, const Arra
 		singleton->session_active = true;
 		singleton->_send_active_bt_players();
 		singleton->_send_active_hsms();
+	} else if (p_msg == "track_blackboard") {
+		singleton->_track_blackboard(p_args);
+	} else if (p_msg == "untrack_blackboard") {
+		singleton->_untrack_blackboard();
 	} else if (p_msg == "stop_session") {
 		singleton->session_active = false;
+		singleton->_untrack_blackboard();
 	} else {
 		r_captured = false;
 	}
@@ -376,6 +391,218 @@ void LimboDebugger::_on_bt_instance_updated(int _status, uint64_t p_instance_id)
 	ERR_FAIL_NULL(inst);
 	Array arr = BehaviorTreeData::serialize(inst);
 	EngineDebugger::get_singleton()->send_message("limboai:bt_update", arr);
+}
+
+// ── Blackboard ────────────────────────────────────────────────────────────────
+
+namespace {
+
+// Between the names of a path into a value: "record", then "record<US>ai". A character no key
+// is going to contain, which a slash or a dot is not: record keys hold both.
+const char32_t BB_PATH_SEPARATOR = 0x1f;
+// How much of a container is sent once it is unfolded, and how deep unfolding may go. Both
+// keep one careless click on a big dictionary from sending the whole save.
+const int BB_MAX_CHILDREN = 200;
+const int BB_MAX_DEPTH = 16;
+// How much of a value is written out. The pane is a column, not a reader.
+const int BB_MAX_TEXT = 160;
+// Row flags, the third field of a row. Mirrored in limbo_debugger_plugin.cpp.
+const int BB_FLAG_BOUND = 1;
+const int BB_FLAG_LINKED = 2;
+const int BB_FLAG_CONTAINER = 4;
+const int BB_FLAG_TRUNCATED = 8;
+
+String _clip(const String &p_text) {
+	return p_text.length() > BB_MAX_TEXT ? p_text.substr(0, BB_MAX_TEXT) + String("...") : p_text;
+}
+
+// An object is said by what it is and, for a resource from a file, which file: a helper
+// script shows up as its path rather than as one more "<GDScript#...>".
+String _object_text(const Variant &p_value) {
+	Object *obj = p_value.get_validated_object();
+	if (obj == nullptr) {
+		return String("null");
+	}
+	Resource *res = Object::cast_to<Resource>(obj);
+	if (res != nullptr && !res->get_path().is_empty()) {
+		return vformat("%s  %s", obj->get_class(), res->get_path());
+	}
+	return p_value.stringify();
+}
+
+} // namespace
+
+void LimboDebugger::_track_blackboard(const Array &p_args) {
+	bb_interval_msec = p_args.size() > 0 ? MAX(int64_t(p_args[0]), int64_t(100)) : 100;
+	bb_expanded.clear();
+	if (p_args.size() > 1) {
+		PackedStringArray paths = p_args[1];
+		for (int i = 0; i < paths.size(); i++) {
+			bb_expanded.insert(paths[i]);
+		}
+	}
+	// Due at once: an unfolded row should not wait out the interval to show what is in it.
+	bb_last_sent_msec = 0;
+	if (bb_tracking) {
+		return;
+	}
+	SceneTree *tree = SCENE_TREE();
+	ERR_FAIL_NULL(tree);
+	bb_tracking = true;
+	tree->connect("process_frame", callable_mp(this, &LimboDebugger::_on_process_frame));
+}
+
+void LimboDebugger::_untrack_blackboard() {
+	if (!bb_tracking) {
+		return;
+	}
+	bb_tracking = false;
+	SceneTree *tree = SCENE_TREE();
+	if (tree != nullptr && tree->is_connected("process_frame", callable_mp(this, &LimboDebugger::_on_process_frame))) {
+		tree->disconnect("process_frame", callable_mp(this, &LimboDebugger::_on_process_frame));
+	}
+}
+
+// Every frame rather than on a tree update, because a machine standing in a state with no
+// tree has a blackboard too, and nothing else would ever send it.
+void LimboDebugger::_on_process_frame() {
+	if (!session_active || !bb_tracking) {
+		return;
+	}
+	uint64_t now = Time::get_singleton()->get_ticks_msec();
+	if (bb_last_sent_msec != 0 && now - bb_last_sent_msec < bb_interval_msec) {
+		return;
+	}
+	bb_last_sent_msec = now;
+	_send_blackboard();
+}
+
+// One row: [key, type, flags, text, children]. Children are rows of the same shape, filled in
+// only for a container the editor has unfolded.
+Array LimboDebugger::_describe_value(const String &p_key, const Variant &p_value, const String &p_path, int p_depth) const {
+	int flags = 0;
+	Array children;
+	String text;
+	if (p_value.get_type() == Variant::DICTIONARY || p_value.get_type() == Variant::ARRAY) {
+		flags |= BB_FLAG_CONTAINER;
+		bool is_dict = p_value.get_type() == Variant::DICTIONARY;
+		Dictionary dict = is_dict ? Dictionary(p_value) : Dictionary();
+		Array arr = is_dict ? Array() : Array(p_value);
+		int size = is_dict ? dict.size() : arr.size();
+		text = vformat("%s (%d)", is_dict ? "Dictionary" : "Array", size);
+		if (p_depth < BB_MAX_DEPTH && bb_expanded.has(p_path)) {
+			Array keys = is_dict ? dict.keys() : Array();
+			int count = MIN(size, BB_MAX_CHILDREN);
+			for (int i = 0; i < count; i++) {
+				String key = is_dict ? String(keys[i]) : itos(i);
+				Variant value = is_dict ? dict[keys[i]] : arr[i];
+				children.append(_describe_value(key, value, p_path + String::chr(BB_PATH_SEPARATOR) + key, p_depth + 1));
+			}
+			if (count < size) {
+				flags |= BB_FLAG_TRUNCATED;
+			}
+		}
+	} else if (p_value.get_type() == Variant::OBJECT) {
+		text = _object_text(p_value);
+	} else if (p_value.get_type() == Variant::STRING || p_value.get_type() == Variant::STRING_NAME) {
+		text = String("\"") + String(p_value) + String("\"");
+	} else {
+		text = p_value.stringify();
+	}
+	Array row;
+	row.append(p_key);
+	row.append(int(p_value.get_type()));
+	row.append(flags);
+	row.append(_clip(text));
+	row.append(children);
+	return row;
+}
+
+// [source id, scopes]; a scope is [label, rows], innermost first. A variable that shares its
+// data with one further out (a plan mapping or the same-name link) is listed where it is
+// declared, flagged linked, with the label of the outermost scope sharing it in place of the
+// value: the value itself is sent once, there.
+void LimboDebugger::_send_blackboard() {
+	uint64_t source_id = 0;
+	Ref<Blackboard> bb;
+	String first_label;
+	BTInstance *inst = tracked_instance_id != 0 ? Object::cast_to<BTInstance>(OBJECT_DB_GET_INSTANCE(tracked_instance_id)) : nullptr;
+	if (inst != nullptr && inst->get_blackboard().is_valid()) {
+		source_id = tracked_instance_id;
+		bb = inst->get_blackboard();
+		first_label = vformat("Tree  %s", inst->get_source_bt_path().get_file());
+	} else {
+		LimboHSM *hsm = tracked_hsm_id != 0 ? Object::cast_to<LimboHSM>(OBJECT_DB_GET_INSTANCE(tracked_hsm_id)) : nullptr;
+		if (hsm != nullptr && hsm->get_blackboard().is_valid()) {
+			source_id = tracked_hsm_id;
+			bb = hsm->get_blackboard();
+		}
+	}
+
+	Vector<Ref<Blackboard>> chain;
+	for (Ref<Blackboard> scope = bb; scope.is_valid(); scope = scope->get_parent()) {
+		chain.push_back(scope);
+	}
+	Vector<String> labels;
+	for (int i = 0; i < chain.size(); i++) {
+		if (i == chain.size() - 1) {
+			labels.push_back("Root");
+		} else if (i == 0 && !first_label.is_empty()) {
+			labels.push_back(first_label);
+		} else {
+			labels.push_back(vformat("Scope %d", i));
+		}
+	}
+
+	Array scopes;
+	for (int i = 0; i < chain.size(); i++) {
+		// Sorted, so a row stays where it was between updates and is found where the eye
+		// expects it.
+		TypedArray<StringName> listed = chain[i]->list_vars();
+		Vector<String> names;
+		for (int n = 0; n < listed.size(); n++) {
+			names.push_back(String(StringName(listed[n])));
+		}
+		names.sort();
+
+		Array rows;
+		for (int n = 0; n < names.size(); n++) {
+			const BBVariable *var = chain[i]->get_local_variable(names[n]);
+			if (var == nullptr) {
+				continue;
+			}
+			int shared_with = -1;
+			for (int j = i + 1; j < chain.size(); j++) {
+				const BBVariable *outer = chain[j]->get_local_variable(names[n]);
+				if (outer != nullptr && outer->shares_data_with(*var)) {
+					shared_with = j;
+				}
+			}
+			Array row;
+			if (shared_with >= 0) {
+				row.append(names[n]);
+				row.append(int(var->get_type()));
+				row.append(BB_FLAG_LINKED | (var->is_bound() ? BB_FLAG_BOUND : 0));
+				row.append(labels[shared_with]);
+				row.append(Array());
+			} else {
+				row = _describe_value(names[n], var->get_value(), names[n], 0);
+				if (var->is_bound()) {
+					row[2] = int(row[2]) | BB_FLAG_BOUND;
+				}
+			}
+			rows.append(row);
+		}
+		Array scope;
+		scope.append(labels[i]);
+		scope.append(rows);
+		scopes.append(scope);
+	}
+
+	Array arr;
+	arr.append(source_id);
+	arr.append(scopes);
+	EngineDebugger::get_singleton()->send_message("limboai:blackboard", arr);
 }
 
 #endif // ! DEBUG_ENABLED

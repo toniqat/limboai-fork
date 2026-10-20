@@ -54,6 +54,9 @@ public:
 	void set_var(const StringName &p_name, const Variant &p_value);
 	bool has_var(const StringName &p_name) const;
 	_FORCE_INLINE_ bool has_local_var(const StringName &p_name) const { return data.has(p_name); }
+	// C++ only (the debugger): the variable itself rather than its value, so a caller can ask
+	// whether it is bound or linked. Null when this scope does not hold it.
+	_FORCE_INLINE_ const BBVariable *get_local_variable(const StringName &p_name) const { return data.getptr(p_name); }
 	void erase_var(const StringName &p_name);
 	void clear() { data.clear(); }
 	TypedArray<StringName> list_vars() const;

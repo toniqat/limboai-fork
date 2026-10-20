@@ -78,6 +78,23 @@ private:
 
 	void _on_bt_instance_updated(int status, uint64_t p_instance_id);
 
+	// The blackboard pane. Off until the editor asks, because it is the one message here that
+	// grows with the data: a scope chain of a hundred variables, sent every interval.
+	bool bb_tracking = false;
+	uint64_t bb_interval_msec = 100;
+	uint64_t bb_last_sent_msec = 0;
+	// Container values the editor has unfolded, by path of names (see the .cpp for the
+	// separator). Only these send their contents; every other container sends its size.
+	HashSet<String> bb_expanded;
+
+	void _track_blackboard(const Array &p_args);
+	void _untrack_blackboard();
+	void _on_process_frame();
+	// The tracked tree's scope and every scope above it, or the tracked machine's when no
+	// tree is tracked.
+	void _send_blackboard();
+	Array _describe_value(const String &p_key, const Variant &p_value, const String &p_path, int p_depth) const;
+
 public:
 	static Error parse_message(void *p_user, const String &p_msg, const Array &p_args, bool &r_captured);
 #ifdef LIMBOAI_GDEXTENSION

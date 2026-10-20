@@ -217,6 +217,14 @@ String _leaf_of(const String &p_path) {
 	return leaf.is_empty() ? p_path : leaf;
 }
 
+// The blackboard message, as limbo_debugger.cpp writes it: a row is [key, type, flags, text,
+// children], and a path into a value joins the keys with this separator.
+const char32_t BB_PATH_SEPARATOR = 0x1f;
+const int BB_FLAG_BOUND = 1;
+const int BB_FLAG_LINKED = 2;
+const int BB_FLAG_CONTAINER = 4;
+const int BB_FLAG_TRUNCATED = 8;
+
 } // namespace
 
 struct LimboDebuggerTab::AgentRowSorter {
@@ -231,6 +239,7 @@ void LimboDebuggerTab::_reset_controls() {
 	agent_list->clear();
 	bt_view->clear();
 	history->clear();
+	bb_tree->clear();
 	_clear_machine();
 	alert_box->hide();
 	info_message->set_text(TTR("Run project to start debugging."));
@@ -251,7 +260,9 @@ void LimboDebuggerTab::start_session() {
 	// the moment before there is anybody to pick.
 	info_message->set_text(TTR("Waiting for a character with a state machine."));
 	info_message->show();
+	bb_tree->clear();
 	session->send_message("limboai:start_session", Array());
+	_send_blackboard_tracking();
 }
 
 void LimboDebuggerTab::stop_session() {
@@ -687,6 +698,239 @@ void LimboDebuggerTab::_resource_header_pressed() {
 	EditorInterface::get_singleton()->edit_resource(bt);
 }
 
+// -- The blackboard --------------------------------------------------------
+
+void LimboDebuggerTab::_send_blackboard_tracking() {
+	if (session.is_null() || !session->is_active()) {
+		return;
+	}
+	if (!bb_box->is_visible()) {
+		session->send_message("limboai:untrack_blackboard", Array());
+		return;
+	}
+	PackedStringArray paths;
+	for (const String &path : bb_expanded) {
+		paths.push_back(path);
+	}
+	Array data;
+	// The tree's interval, floored on the far side: a hundred rows every frame is a cost the
+	// game would pay for a pane nobody reads that fast.
+	data.push_back(int64_t(update_interval->get_value()));
+	data.push_back(paths);
+	session->send_message("limboai:track_blackboard", data);
+}
+
+void LimboDebuggerTab::_bb_toggled(bool p_open) {
+	bb_box->set_visible(p_open);
+	if (!p_open) {
+		bb_tree->clear();
+	}
+	_send_blackboard_tracking();
+}
+
+void LimboDebuggerTab::_bb_interval_changed(double p_value) {
+	_send_blackboard_tracking();
+}
+
+void LimboDebuggerTab::_bb_item_collapsed(TreeItem *p_item) {
+	if (bb_syncing || p_item == nullptr) {
+		return;
+	}
+	Variant scope_label = p_item->get_metadata(1);
+	if (scope_label.get_type() == Variant::STRING) {
+		if (p_item->is_collapsed()) {
+			bb_folded_scopes.insert(scope_label);
+		} else {
+			bb_folded_scopes.erase(scope_label);
+		}
+		return;
+	}
+	Variant path = p_item->get_metadata(0);
+	if (path.get_type() != Variant::STRING || !(int(p_item->get_metadata(1)) & BB_FLAG_CONTAINER)) {
+		return;
+	}
+	if (p_item->is_collapsed()) {
+		// The ones below go too: unfolding this again starts from the top, as a fresh look.
+		String prefix = String(path) + String::chr(BB_PATH_SEPARATOR);
+		Vector<String> gone;
+		for (const String &expanded : bb_expanded) {
+			if (expanded == String(path) || expanded.begins_with(prefix)) {
+				gone.push_back(expanded);
+			}
+		}
+		for (int i = 0; i < gone.size(); i++) {
+			bb_expanded.erase(gone[i]);
+		}
+	} else {
+		bb_expanded.insert(path);
+	}
+	_send_blackboard_tracking();
+}
+
+void LimboDebuggerTab::_bb_filter_changed(String p_text) {
+	_bb_apply_filter();
+}
+
+// By the variable's name, on the top rows of every scope. What is inside a container stays
+// as it is: it was unfolded to be read whole.
+void LimboDebuggerTab::_bb_apply_filter() {
+	TreeItem *root = bb_tree->get_root();
+	if (root == nullptr) {
+		return;
+	}
+	String filter = bb_filter->get_text().to_lower();
+	for (TreeItem *scope = root->get_first_child(); scope != nullptr; scope = scope->get_next()) {
+		for (TreeItem *row = scope->get_first_child(); row != nullptr; row = row->get_next()) {
+			row->set_visible(filter.is_empty() || row->get_text(0).to_lower().contains(filter));
+		}
+	}
+}
+
+void LimboDebuggerTab::update_blackboard(const Array &p_data) {
+	if (p_data.size() < 2 || !bb_box->is_visible()) {
+		return;
+	}
+	Array scopes = p_data[1];
+	bb_syncing = true;
+	TreeItem *root = bb_tree->get_root();
+	if (root == nullptr) {
+		root = bb_tree->create_item();
+	}
+
+	HashSet<String> wanted;
+	for (int i = 0; i < scopes.size(); i++) {
+		Array scope = scopes[i];
+		wanted.insert(String(scope[0]));
+	}
+	HashMap<String, TreeItem *> existing;
+	Vector<TreeItem *> stale;
+	for (TreeItem *item = root->get_first_child(); item != nullptr; item = item->get_next()) {
+		String label = item->get_metadata(1);
+		if (wanted.has(label)) {
+			existing[label] = item;
+		} else {
+			stale.push_back(item);
+		}
+	}
+	for (int i = 0; i < stale.size(); i++) {
+		memdelete(stale[i]);
+	}
+
+	for (int i = 0; i < scopes.size(); i++) {
+		Array scope = scopes[i];
+		String label = scope[0];
+		TreeItem *item = existing.has(label) ? existing[label] : bb_tree->create_item(root, i);
+		if (item->get_index() != i) {
+			item->move_before(root->get_child(i));
+		}
+		item->set_text(0, label);
+		item->set_metadata(1, label);
+		item->set_selectable(0, false);
+		item->set_selectable(1, false);
+		item->set_custom_color(0, get_theme_color(LW_NAME(accent_color), LW_NAME(Editor)));
+		item->set_collapsed(bb_folded_scopes.has(label));
+		_bb_sync_rows(item, scope[1], String());
+	}
+	bb_syncing = false;
+	_bb_apply_filter();
+}
+
+void LimboDebuggerTab::_bb_sync_rows(TreeItem *p_parent, const Array &p_rows, const String &p_parent_path) {
+	HashSet<String> wanted;
+	for (int i = 0; i < p_rows.size(); i++) {
+		Array row = p_rows[i];
+		wanted.insert(String(row[0]));
+	}
+	// Placeholders and the "more" line have no path and are written afresh every time.
+	HashMap<String, TreeItem *> existing;
+	Vector<TreeItem *> stale;
+	for (TreeItem *item = p_parent->get_first_child(); item != nullptr; item = item->get_next()) {
+		if (item->get_metadata(0).get_type() == Variant::STRING && wanted.has(item->get_text(0))) {
+			existing[item->get_text(0)] = item;
+		} else {
+			stale.push_back(item);
+		}
+	}
+	for (int i = 0; i < stale.size(); i++) {
+		memdelete(stale[i]);
+	}
+
+	const Color dim = get_theme_color("font_disabled_color", LW_NAME(Editor));
+	for (int i = 0; i < p_rows.size(); i++) {
+		Array row = p_rows[i];
+		String key = row[0];
+		Variant::Type type = Variant::Type(int(row[1]));
+		int flags = row[2];
+		String text = row[3];
+		Array children = row[4];
+		String path = p_parent_path.is_empty() ? key : p_parent_path + String::chr(BB_PATH_SEPARATOR) + key;
+
+		TreeItem *item = existing.has(key) ? existing[key] : bb_tree->create_item(p_parent, i);
+		if (item->get_index() != i) {
+			item->move_before(p_parent->get_child(i));
+		}
+		item->set_text(0, key);
+		item->set_metadata(0, path);
+		item->set_metadata(1, flags);
+		String type_name = Variant::get_type_name(type);
+		item->set_icon(0, has_theme_icon(type_name, LW_NAME(EditorIcons)) ? get_theme_icon(type_name, LW_NAME(EditorIcons)) : Ref<Texture2D>());
+		item->set_tooltip_text(0, vformat("%s: %s", key, type_name));
+
+		String tooltip;
+		if (flags & BB_FLAG_LINKED) {
+			// The value is shown once, in the scope that holds it. Here only where to look.
+			item->set_text(1, String::utf8("→ ") + text);
+			item->set_custom_color(1, dim);
+			tooltip = vformat(TTR("Linked: the same variable as \"%s\" in %s."), key, text);
+		} else {
+			item->set_text(1, text);
+			item->clear_custom_color(1);
+			tooltip = text;
+		}
+		if (flags & BB_FLAG_BOUND) {
+			item->set_icon(1, get_theme_icon("Instance", LW_NAME(EditorIcons)));
+			tooltip += String("\n") + TTR("Bound to a property: read through its getter, never written.");
+		} else {
+			item->set_icon(1, Ref<Texture2D>());
+		}
+		item->set_tooltip_text(1, tooltip);
+
+		if (!(flags & BB_FLAG_CONTAINER)) {
+			while (item->get_first_child() != nullptr) {
+				memdelete(item->get_first_child());
+			}
+			continue;
+		}
+		if (!bb_expanded.has(path)) {
+			// One placeholder, so the fold arrow is there to be clicked. The contents are only
+			// asked for once it is.
+			TreeItem *first = item->get_first_child();
+			bool placeholder_only = first != nullptr && first->get_next() == nullptr && first->get_metadata(0).get_type() != Variant::STRING;
+			if (!placeholder_only) {
+				while (item->get_first_child() != nullptr) {
+					memdelete(item->get_first_child());
+				}
+				TreeItem *placeholder = bb_tree->create_item(item);
+				placeholder->set_text(0, "...");
+				placeholder->set_selectable(0, false);
+				placeholder->set_selectable(1, false);
+			}
+			item->set_collapsed(true);
+			continue;
+		}
+		_bb_sync_rows(item, children, path);
+		if (flags & BB_FLAG_TRUNCATED) {
+			TreeItem *more = bb_tree->create_item(item);
+			more->set_text(0, "...");
+			more->set_text(1, TTR("(more entries not shown)"));
+			more->set_custom_color(1, dim);
+			more->set_selectable(0, false);
+			more->set_selectable(1, false);
+		}
+		item->set_collapsed(false);
+	}
+}
+
 void LimboDebuggerTab::_bind_methods() {
 }
 
@@ -701,6 +945,10 @@ void LimboDebuggerTab::_notification(int p_what) {
 			agent_list->connect(LW_NAME(item_selected), callable_mp(this, &LimboDebuggerTab::_agent_selected));
 			hsm_view->connect("state_picked", callable_mp(this, &LimboDebuggerTab::_on_state_picked));
 			update_interval->connect("value_changed", callable_mp(bt_view, &BehaviorTreeView::set_update_interval_msec));
+			update_interval->connect("value_changed", callable_mp(this, &LimboDebuggerTab::_bb_interval_changed));
+			bb_toggle->connect(LW_NAME(toggled), callable_mp(this, &LimboDebuggerTab::_bb_toggled));
+			bb_filter->connect(LW_NAME(text_changed), callable_mp(this, &LimboDebuggerTab::_bb_filter_changed));
+			bb_tree->connect(LW_NAME(item_collapsed), callable_mp(this, &LimboDebuggerTab::_bb_item_collapsed));
 
 			Ref<ConfigFile> cf;
 			cf.instantiate();
@@ -708,6 +956,7 @@ void LimboDebuggerTab::_notification(int p_what) {
 			if (cf->load(conf_path) == OK) {
 				Variant value = cf->get_value("LimboAI", "debugger_update_interval_msec", 0);
 				update_interval->set_value(value);
+				bb_toggle->set_pressed(cf->get_value("LimboAI", "debugger_blackboard_open", false));
 			}
 		} break;
 		case NOTIFICATION_EXIT_TREE: {
@@ -716,6 +965,7 @@ void LimboDebuggerTab::_notification(int p_what) {
 			String conf_path = LAYOUT_CONFIG_FILE();
 			cf->load(conf_path);
 			cf->set_value("LimboAI", "debugger_update_interval_msec", update_interval->get_value());
+			cf->set_value("LimboAI", "debugger_blackboard_open", bb_toggle->is_pressed());
 			cf->save(conf_path);
 		} break;
 		case NOTIFICATION_THEME_CHANGED: {
@@ -744,7 +994,8 @@ void LimboDebuggerTab::setup(Ref<EditorDebuggerSession> p_session, CompatWindowW
 // Four panes, left to right: who, what states it has, how they join, and what the one it is
 // standing in is doing. They stand together because reading a character means reading all
 // four at once -- with the machine in one tab and its tree in another, the thing joining
-// "which state is it in" to "which branch is it turning" is the reader's own memory.
+// "which state is it in" to "which branch is it turning" is the reader's own memory. A fifth,
+// the blackboard, opens from the toolbar to the right of the tree.
 LimboDebuggerTab::LimboDebuggerTab() {
 	root_vb = memnew(VBoxContainer);
 	add_child(root_vb);
@@ -776,6 +1027,14 @@ LimboDebuggerTab::LimboDebuggerTab() {
 
 	VSeparator *sep = memnew(VSeparator);
 	toolbar->add_child(sep);
+
+	bb_toggle = memnew(Button);
+	bb_toggle->set_toggle_mode(true);
+	bb_toggle->set_flat(true);
+	bb_toggle->set_focus_mode(FOCUS_NONE);
+	bb_toggle->set_text(TTR("Blackboard"));
+	bb_toggle->set_tooltip_text(TTR("Show the blackboard of the tree being shown, scope by scope (read only)."));
+	toolbar->add_child(bb_toggle);
 
 	hsc = memnew(HSplitContainer);
 	hsc->set_h_size_flags(Control::SIZE_EXPAND_FILL);
@@ -818,9 +1077,39 @@ LimboDebuggerTab::LimboDebuggerTab() {
 	history->set_custom_minimum_size(Size2(0, 60 * EDSCALE));
 	machine_split->add_child(history);
 
+	// The tree and, when open, the blackboard beside it: the variables are read against the
+	// branch that is running, so the two stand side by side rather than one under the other.
+	HSplitContainer *tree_split = memnew(HSplitContainer);
+	tree_split->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	tree_split->set_v_size_flags(Control::SIZE_EXPAND_FILL);
+	right_split->add_child(tree_split);
+
 	view_box = memnew(VBoxContainer);
 	view_box->set_custom_minimum_size(Size2(240.0 * EDSCALE, 0.0));
-	right_split->add_child(view_box);
+	view_box->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	tree_split->add_child(view_box);
+
+	bb_box = memnew(VBoxContainer);
+	bb_box->set_custom_minimum_size(Size2(260.0 * EDSCALE, 0.0));
+	bb_box->hide();
+	tree_split->add_child(bb_box);
+
+	bb_filter = memnew(LineEdit);
+	bb_filter->set_placeholder(TTR("Filter Variables"));
+	bb_filter->set_clear_button_enabled(true);
+	bb_box->add_child(bb_filter);
+
+	bb_tree = memnew(Tree);
+	bb_tree->set_columns(2);
+	bb_tree->set_column_titles_visible(true);
+	bb_tree->set_column_title(0, TTR("Variable"));
+	bb_tree->set_column_title(1, TTR("Value"));
+	bb_tree->set_column_expand_ratio(1, 2);
+	bb_tree->set_column_clip_content(0, true);
+	bb_tree->set_column_clip_content(1, true);
+	bb_tree->set_hide_root(true);
+	bb_tree->set_v_size_flags(SIZE_EXPAND_FILL);
+	bb_box->add_child(bb_tree);
 
 	bt_view = memnew(BehaviorTreeView);
 	bt_view->set_h_size_flags(Control::SIZE_EXPAND_FILL);
@@ -908,6 +1197,8 @@ bool LimboDebuggerPlugin::_capture(const String &p_message, const Array &p_data,
 		if (data->bt_instance_id == tab->get_selected_bt_instance_id()) {
 			tab->update_behavior_tree(data);
 		}
+	} else if (p_message == "limboai:blackboard") {
+		tab->update_blackboard(p_data);
 	} else {
 		captured = false;
 	}
